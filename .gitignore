@@ -1,5 +1,9 @@
 .idea/
 
+# Prevent uv from creating nested .venvs in submodules
+kronos/.venv/
+ta-agents/.venv/
+
 # Python
 __pycache__/
 *.pyc

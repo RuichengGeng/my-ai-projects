@@ -13,7 +13,6 @@ dependencies = [
     "matplotlib==3.9.3",
     "tqdm>=4.67.1",
     "safetensors==0.6.2",
-
     # --- TradingAgents dependencies (from pyproject.toml) ---
     "langchain-core>=0.3.81",
     "backtrader>=1.9.78.123",
@@ -33,12 +32,21 @@ dependencies = [
     "stockstats>=0.6.5",
     "typing-extensions>=4.14.0",
     "yfinance>=0.2.63",
+    "tradingagents",
 ]
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["finance_ai*"]
 exclude = ["kronos*", "tradingagents*"]
+
+[tool.uv.workspace]
+members = [
+    "ta-agents",
+]
+
+[tool.uv.sources]
+tradingagents = { workspace = true, editable = true }
 
 [build-system]
 requires = ["setuptools>=61.0"]
