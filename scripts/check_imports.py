@@ -14,27 +14,29 @@ def try_import(name, import_stmt=None):
         errors.append(f"  ❌ {name}: {e}")
         print(f"  ❌ {name}: {e}")
 
-print("── Submodule imports ──")
-try_import("Kronos", "from model.kronos import Kronos, KronosTokenizer")
-try_import("tradingagents", "import tradingagents")
 
-print("\n── Core dependencies ──")
-try_import("torch")
-try_import("pandas")
-try_import("numpy")
-try_import("langgraph")
-try_import("backtrader")
-try_import("yfinance")
-try_import("langchain_core")
-try_import("matplotlib")
+if __name__ == "__main__":
+    print("── Submodule imports ──")
+    try_import("Kronos", "from model.kronos import Kronos, KronosTokenizer")
+    try_import("tradingagents", "import tradingagents")
 
-print(f"\n── Versions ──")
-import torch; print(f"  Torch:     {torch.__version__}")
-import pandas; print(f"  Pandas:    {pandas.__version__}")
-import numpy; print(f"  NumPy:     {numpy.__version__}")
+    print("\n── Core dependencies ──")
+    try_import("torch")
+    try_import("pandas")
+    try_import("numpy")
+    try_import("langgraph")
+    try_import("backtrader")
+    try_import("yfinance")
+    try_import("langchain_core")
+    try_import("matplotlib")
 
-if errors:
-    print(f"\n❌ {len(errors)} error(s) found")
-    sys.exit(1)
-else:
-    print("\n✅ All imports OK")
+    print(f"\n── Versions ──")
+    import torch; print(f"  Torch:     {torch.__version__}")
+    import pandas; print(f"  Pandas:    {pandas.__version__}")
+    import numpy; print(f"  NumPy:     {numpy.__version__}")
+
+    if errors:
+        print(f"\n❌ {len(errors)} error(s) found")
+        sys.exit(1)
+    else:
+        print("\n✅ All imports OK")
