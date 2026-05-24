@@ -19,6 +19,7 @@ if __name__ == "__main__":
     print("── Submodule imports ──")
     try_import("Kronos", "from model.kronos import Kronos, KronosTokenizer")
     try_import("tradingagents", "import tradingagents")
+    try_import("my_playground", "from my_playground.deepseek_client import DeepSeekClient")
 
     print("\n── Core dependencies ──")
     try_import("torch")

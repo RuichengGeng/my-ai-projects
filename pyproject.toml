@@ -37,7 +37,7 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["finance_ai*"]
+include = ["finance_ai*", "my_playground*"]
 exclude = ["kronos*", "tradingagents*"]
 
 [tool.uv.workspace]
