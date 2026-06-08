@@ -2,23 +2,123 @@
   "questions": [
     {
       "id": "q1",
-      "question": "How should a portfolio manager hedge against inflation using commodities?"
+      "question": "How should a portfolio manager hedge against inflation using commodities?",
+      "topic": "",
+      "question_type": "synthesis",
+      "expected_keywords": ["inflation", "hedge", "commodities", "portfolio"],
+      "notes": "Tests synthesis across general commodity theory content."
     },
     {
       "id": "q2",
-      "question": "What is the role of inventory in determining commodity spot prices?"
+      "question": "What is the role of inventory in determining commodity spot prices?",
+      "topic": "",
+      "question_type": "factual",
+      "expected_keywords": ["inventory", "spot price", "storage"],
+      "notes": "Factual concept definition. Answer should cite a specific document section."
     },
     {
       "id": "q3",
-      "question": "Why are commodity-linked equities not a substitute for direct commodity exposure?"
+      "question": "Why are commodity-linked equities not a substitute for direct commodity exposure?",
+      "topic": "",
+      "question_type": "factual",
+      "expected_keywords": ["equity", "commodity", "exposure", "correlation"],
+      "notes": "Tests whether the model retrieves the specific argument and does not hallucinate."
     },
     {
       "id": "q4",
-      "question": "What is roll yield and how does it affect commodity returns?"
+      "question": "What is roll yield and how does it affect commodity futures returns?",
+      "topic": "",
+      "question_type": "factual",
+      "expected_keywords": ["roll yield", "futures", "contango", "backwardation"],
+      "notes": "Concept question. Contango/backwardation should appear if context is good."
     },
     {
       "id": "q5",
-      "question": "How does gold differ from other commodities as an inflation hedge?"
+      "question": "How does gold differ from other commodities as an inflation hedge?",
+      "topic": "",
+      "question_type": "factual",
+      "expected_keywords": ["gold", "inflation", "store of value"],
+      "notes": "Tests whether retrieval distinguishes gold from industrial commodities."
+    },
+    {
+      "id": "q6",
+      "question": "What is the latest APAC oil market outlook and what are the key price drivers?",
+      "topic": "APAC Oil Week",
+      "question_type": "latest",
+      "expected_keywords": ["APAC", "oil", "price", "demand"],
+      "notes": "Tests topic routing to APAC Oil Week AND series detection for the latest report."
+    },
+    {
+      "id": "q7",
+      "question": "How has the APAC oil demand trend changed over the recent reports?",
+      "topic": "APAC Oil Week",
+      "question_type": "synthesis",
+      "expected_keywords": ["demand", "trend", "APAC", "oil"],
+      "notes": "Requires synthesis across multiple issues of the same series."
+    },
+    {
+      "id": "q8",
+      "question": "What supply-side risks are mentioned in the APAC oil week reports?",
+      "topic": "APAC Oil Week",
+      "question_type": "factual",
+      "expected_keywords": ["supply", "risk", "production"],
+      "notes": "Factual retrieval scoped to APAC Oil Week topic."
+    },
+    {
+      "id": "q9",
+      "question": "What machine learning techniques are proposed for OGU trading?",
+      "topic": "ML for OGU Trading",
+      "question_type": "factual",
+      "expected_keywords": ["machine learning", "model", "trading", "signal"],
+      "notes": "Tests topic routing to ML topic. Adjust the topic string to match your exact folder name."
+    },
+    {
+      "id": "q10",
+      "question": "How is model performance evaluated in the OGU trading ML approach?",
+      "topic": "ML for OGU Trading",
+      "question_type": "factual",
+      "expected_keywords": ["performance", "backtesting", "accuracy"],
+      "notes": "Evaluation methodology question within ML topic."
+    },
+    {
+      "id": "q11",
+      "question": "What are the main risks and limitations of applying ML models to commodity trading?",
+      "topic": "ML for OGU Trading",
+      "question_type": "synthesis",
+      "expected_keywords": ["risk", "overfitting", "data", "limitation"],
+      "notes": "Synthesis within ML topic. Tests whether the model can summarise caveats."
+    },
+    {
+      "id": "q12",
+      "question": "What was the crude oil price on 1 January 2020?",
+      "topic": "",
+      "question_type": "out_of_scope",
+      "expected_keywords": [],
+      "notes": "Out-of-scope question. A well-behaved RAG must say it cannot find this in context, not hallucinate a number. Faithfulness=5 only if it declines."
+    },
+    {
+      "id": "q13",
+      "question": "What is the central bank interest rate decision expected next quarter?",
+      "topic": "",
+      "question_type": "out_of_scope",
+      "expected_keywords": [],
+      "notes": "Out-of-scope forward-looking question. Same hallucination-resistance test as q12."
+    },
+    {
+      "id": "q14",
+      "question": "Summarise everything covered across all indexed documents.",
+      "topic": "",
+      "question_type": "synthesis",
+      "expected_keywords": [],
+      "notes": "Stress test: broad synthesis across all topics. Completeness will be low — useful as a baseline ceiling."
+    },
+    {
+      "id": "q15",
+      "question": "Are there any contradictions between the APAC oil reports and the ML trading analysis on commodity price direction?",
+      "topic": "",
+      "question_type": "cross_topic",
+      "expected_keywords": [],
+      "notes": "Cross-topic question. Tests whether retrieval can pull from two different topic buckets in one query."
     }
   ]
 }
