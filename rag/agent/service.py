@@ -23,6 +23,7 @@ evaluate  Asks DeepSeek to score completeness. If incomplete, provides a
 
 import json
 import os
+from datetime import date
 from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -39,7 +40,9 @@ class AgentState(TypedDict):
     query: str               # current retrieval query (refined each loop)
     topic_filter: str        # topic label to filter on, or ""
     series_filter: str       # series_name to filter on (within a topic), or ""
-    doc_filter: str          # specific doc_name to filter on, or ""
+    doc_filter: str          # specific doc_name (latest-only queries), or ""
+    date_from: str           # ISO date lower bound for date_range scope, or ""
+    date_to: str             # ISO date upper bound for date_range scope, or ""
     chunks: list[dict]
     context: str             # formatted context string
     draft_answer: str
@@ -79,8 +82,11 @@ def _json(text: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _plan(state: AgentState) -> dict:
-    """Identify whether the question targets a specific topic and/or series."""
-    _empty = {"topic_filter": "", "series_filter": "", "doc_filter": "", "query": state["question"]}
+    """Identify whether the question targets a specific topic and determine the time scope."""
+    _empty = {
+        "topic_filter": "", "series_filter": "", "doc_filter": "",
+        "date_from": "", "date_to": "", "query": state["question"],
+    }
     if not MANIFEST_PATH.exists():
         return _empty
 
@@ -89,7 +95,6 @@ def _plan(state: AgentState) -> dict:
     if not docs:
         return _empty
 
-    # Build topic → docs mapping and topic → series_name mapping
     topic_docs: dict[str, list[dict]] = {}
     topic_series: dict[str, str] = {}
     for d in docs:
@@ -104,44 +109,75 @@ def _plan(state: AgentState) -> dict:
     if not topic_docs:
         return _empty
 
-    # Build a concise description of each topic for the LLM
     topic_lines = []
     for t in sorted(topic_docs.keys()):
         tdocs = topic_docs[t]
-        dated = [d["series_date"] for d in tdocs if d.get("series_date")]
+        dated = sorted(d["series_date"] for d in tdocs if d.get("series_date"))
         if dated:
-            topic_lines.append(f"  - {t}  ({len(tdocs)} reports, latest: {max(dated)})")
+            topic_lines.append(
+                f"  - {t}  ({len(tdocs)} reports, dates: {dated[0]} to {dated[-1]})"
+            )
         else:
             topic_lines.append(f"  - {t}  (standalone)")
 
+    today = date.today().isoformat()
     prompt = (
+        f"Today's date: {today}\n\n"
         "Available document topics:\n"
         + "\n".join(topic_lines)
         + f"\n\nQuestion: {state['question']}\n\n"
-        "Does this question target one of the topics above? "
-        "If yes, also say whether the user wants the LATEST report or all reports in that topic. "
-        'Respond with JSON only: {"topic": "<exact topic name or empty string>", "latest_only": true/false}'
+        "Does this question target one of the topics above?\n"
+        "If yes, determine the reporting scope:\n"
+        '  "latest"     – only the single most recent report\n'
+        '  "date_range" – reports within a specific date window '
+        '(e.g. "last week", "this month", "week of June 2"). '
+        "Compute date_from and date_to as YYYY-MM-DD strings relative to today.\n"
+        '  "all"        – all reports in the topic\n\n'
+        "Respond with JSON only:\n"
+        '{"topic": "<exact topic name or empty>", '
+        '"scope": "latest|date_range|all", '
+        '"date_from": "<YYYY-MM-DD or empty>", '
+        '"date_to": "<YYYY-MM-DD or empty>"}'
     )
 
     try:
         result = _json(_deepseek([{"role": "user", "content": prompt}]))
         topic = result.get("topic", "").strip()
-        latest_only = result.get("latest_only", False)
+        scope = result.get("scope", "all")
+        date_from = result.get("date_from", "").strip()
+        date_to = result.get("date_to", "").strip()
 
         series_filter = topic_series.get(topic, "") if topic else ""
         doc_filter = ""
 
-        if topic and latest_only and topic in topic_docs:
+        if topic and scope == "latest" and topic in topic_docs:
             candidates = [d for d in topic_docs[topic] if d.get("series_date")]
             if candidates:
                 newest = max(candidates, key=lambda d: d.get("series_date") or "")
                 doc_filter = newest["doc_name"]
-                series_filter = ""  # doc_filter is more specific
+                series_filter = ""
+            date_from = date_to = ""
 
-        print(f"  [plan] topic={topic or 'all'}  latest_only={latest_only}"
-              + (f"  → doc_filter={doc_filter[:50]}" if doc_filter else
-                 f"  → series_filter={series_filter}" if series_filter else ""))
-        return {"topic_filter": topic, "series_filter": series_filter, "doc_filter": doc_filter, "query": state["question"]}
+        elif scope != "date_range":
+            date_from = date_to = ""
+
+        log = f"  [plan] topic={topic or 'all'}  scope={scope}"
+        if doc_filter:
+            log += f"  → doc={doc_filter[:50]}"
+        elif date_from:
+            log += f"  → {date_from} to {date_to}"
+        elif series_filter:
+            log += f"  → series={series_filter}"
+        print(log)
+
+        return {
+            "topic_filter": topic,
+            "series_filter": series_filter,
+            "doc_filter": doc_filter,
+            "date_from": date_from,
+            "date_to": date_to,
+            "query": state["question"],
+        }
     except Exception:
         return _empty
 
@@ -150,6 +186,13 @@ def _retrieve(state: AgentState, retriever: RAGRetriever, n_results: int) -> dic
     where: dict | None = None
     if state["doc_filter"]:
         where = {"doc_name": {"$eq": state["doc_filter"]}}
+    elif state["date_from"] and state["series_filter"]:
+        # Date-range query within a series: combine with $and
+        conditions: list[dict] = [{"series_name": {"$eq": state["series_filter"]}}]
+        conditions.append({"series_date": {"$gte": state["date_from"]}})
+        if state["date_to"]:
+            conditions.append({"series_date": {"$lte": state["date_to"]}})
+        where = {"$and": conditions}
     elif state["series_filter"]:
         where = {"series_name": {"$eq": state["series_filter"]}}
     elif state["topic_filter"]:
@@ -292,6 +335,8 @@ class RAGAgent:
             "topic_filter": "",
             "series_filter": "",
             "doc_filter": "",
+            "date_from": "",
+            "date_to": "",
             "chunks": [],
             "context": "",
             "draft_answer": "",
