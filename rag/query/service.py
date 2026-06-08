@@ -79,4 +79,8 @@ class RAGRetriever:
                 }
             ],
         )
+        from rag.utils.token_tracker import get_active_tracker
+        tracker = get_active_tracker()
+        if tracker is not None:
+            tracker.record(response.usage, label="retriever_ask")
         return response.choices[0].message.content
