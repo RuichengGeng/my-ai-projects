@@ -32,7 +32,6 @@ dependencies = [
     "stockstats>=0.6.5",
     "typing-extensions>=4.14.0",
     "yfinance>=0.2.63",
-    "tradingagents",
     # --- pdf_parser dependencies ---
     "pypdf>=4.0.0",
     "python-dotenv>=1.0.0",
@@ -46,14 +45,6 @@ dependencies = [
 where = ["."]
 include = ["finance_ai*", "my_playground*", "rag*", "pdf_parser*"]
 exclude = ["kronos*", "tradingagents*"]
-
-[tool.uv.workspace]
-members = [
-    "ta-agents",
-]
-
-[tool.uv.sources]
-tradingagents = { workspace = true, editable = true }
 
 [build-system]
 requires = ["setuptools>=61.0"]
