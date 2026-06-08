@@ -60,11 +60,12 @@ class RAGRetriever:
             for c in chunks
         )
 
+        from utils.retry import call_with_retry
         client = OpenAI(
             api_key=os.environ.get("DEEPSEEK_API_KEY"),
             base_url=DEEPSEEK_BASE_URL,
         )
-        response = client.chat.completions.create(
+        response = call_with_retry(lambda: client.chat.completions.create(
             model=DEEPSEEK_MODEL,
             max_tokens=1024,
             messages=[
@@ -78,7 +79,7 @@ class RAGRetriever:
                     ),
                 }
             ],
-        )
+        ))
         from rag.utils.token_tracker import get_active_tracker
         tracker = get_active_tracker()
         if tracker is not None:

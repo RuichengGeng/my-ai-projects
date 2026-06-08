@@ -66,13 +66,14 @@ Respond with JSON only, no markdown fences:
 def _deepseek(content: str, max_tokens: int = 256, label: str = "") -> str:
     from openai import OpenAI
     from rag.utils.token_tracker import get_active_tracker
+    from utils.retry import call_with_retry
     client = OpenAI(api_key=os.environ.get("DEEPSEEK_API_KEY"), base_url=DEEPSEEK_BASE_URL)
-    resp = client.chat.completions.create(
+    resp = call_with_retry(lambda: client.chat.completions.create(
         model=DEEPSEEK_MODEL,
         max_tokens=max_tokens,
         temperature=0,
         messages=[{"role": "user", "content": content}],
-    )
+    ))
     tracker = get_active_tracker()
     if tracker is not None:
         tracker.record(resp.usage, label=label)
