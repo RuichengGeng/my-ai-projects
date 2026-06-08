@@ -41,6 +41,7 @@ class AgentState(TypedDict):
     topic_filter: str        # topic label to filter on, or ""
     series_filter: str       # series_name to filter on (within a topic), or ""
     doc_filter: str          # specific doc_name (latest-only queries), or ""
+    doc_filters: list[str]   # specific doc_names for date-range queries, or []
     date_from: str           # ISO date lower bound for date_range scope, or ""
     date_to: str             # ISO date upper bound for date_range scope, or ""
     chunks: list[dict]
@@ -85,7 +86,7 @@ def _plan(state: AgentState) -> dict:
     """Identify whether the question targets a specific topic and determine the time scope."""
     _empty = {
         "topic_filter": "", "series_filter": "", "doc_filter": "",
-        "date_from": "", "date_to": "", "query": state["question"],
+        "doc_filters": [], "date_from": "", "date_to": "", "query": state["question"],
     }
     if not MANIFEST_PATH.exists():
         return _empty
@@ -149,6 +150,7 @@ def _plan(state: AgentState) -> dict:
 
         series_filter = topic_series.get(topic, "") if topic else ""
         doc_filter = ""
+        doc_filters: list[str] = []
 
         if topic and scope == "latest" and topic in topic_docs:
             candidates = [d for d in topic_docs[topic] if d.get("series_date")]
@@ -158,22 +160,44 @@ def _plan(state: AgentState) -> dict:
                 series_filter = ""
             date_from = date_to = ""
 
+        elif topic and scope == "date_range" and topic in topic_docs and date_from:
+            candidates = []
+            for d in topic_docs[topic]:
+                series_date = d.get("series_date", "")
+                if not series_date:
+                    continue
+                if series_date < date_from:
+                    continue
+                if date_to and series_date > date_to:
+                    continue
+                candidates.append(d)
+
+            if candidates:
+                doc_filters = [
+                    d["doc_name"]
+                    for d in sorted(candidates, key=lambda x: x.get("series_date") or "")
+                ]
+                series_filter = ""
+
         elif scope != "date_range":
             date_from = date_to = ""
 
         log = f"  [plan] topic={topic or 'all'}  scope={scope}"
         if doc_filter:
-            log += f"  → doc={doc_filter[:50]}"
+            log += f"  -> doc={doc_filter[:50]}"
+        elif doc_filters:
+            log += f"  -> docs={len(doc_filters)}  {date_from} to {date_to or 'latest'}"
         elif date_from:
-            log += f"  → {date_from} to {date_to}"
+            log += f"  -> {date_from} to {date_to}"
         elif series_filter:
-            log += f"  → series={series_filter}"
+            log += f"  -> series={series_filter}"
         print(log)
 
         return {
             "topic_filter": topic,
             "series_filter": series_filter,
             "doc_filter": doc_filter,
+            "doc_filters": doc_filters,
             "date_from": date_from,
             "date_to": date_to,
             "query": state["question"],
@@ -186,13 +210,17 @@ def _retrieve(state: AgentState, retriever: RAGRetriever, n_results: int) -> dic
     where: dict | None = None
     if state["doc_filter"]:
         where = {"doc_name": {"$eq": state["doc_filter"]}}
+    elif state["doc_filters"]:
+        if len(state["doc_filters"]) == 1:
+            where = {"doc_name": {"$eq": state["doc_filters"][0]}}
+        else:
+            where = {"doc_name": {"$in": state["doc_filters"]}}
     elif state["date_from"] and state["series_filter"]:
-        # Date-range query within a series: combine with $and
-        conditions: list[dict] = [{"series_name": {"$eq": state["series_filter"]}}]
-        conditions.append({"series_date": {"$gte": state["date_from"]}})
-        if state["date_to"]:
-            conditions.append({"series_date": {"$lte": state["date_to"]}})
-        where = {"$and": conditions}
+        # Chroma range operators only support numeric metadata. series_date is
+        # stored as an ISO string, so date ranges should normally be converted
+        # to doc_filters in _plan. Fall back to the series rather than using an
+        # invalid string $gte/$lte filter.
+        where = {"series_name": {"$eq": state["series_filter"]}}
     elif state["series_filter"]:
         where = {"series_name": {"$eq": state["series_filter"]}}
     elif state["topic_filter"]:
@@ -335,6 +363,7 @@ class RAGAgent:
             "topic_filter": "",
             "series_filter": "",
             "doc_filter": "",
+            "doc_filters": [],
             "date_from": "",
             "date_to": "",
             "chunks": [],
