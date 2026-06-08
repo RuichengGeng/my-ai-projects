@@ -14,6 +14,13 @@ Series detection
 Doc names containing a trailing date (e.g. "Report_05_Jun_2026", "Report-260511")
 are grouped into a series. The manifest tracks series_name, series_date, and
 which doc is the latest in each series.
+
+Topic categorization
+--------------------
+Every document is assigned a human-readable topic label derived from its folder
+name (underscores/hyphens replaced with spaces). Dated series share a single
+topic (e.g. all "APAC_Oil_Week_*" issues → topic "APAC Oil Week"). The topic
+is stored in ChromaDB metadata and the manifest so queries can filter by it.
 """
 
 import json
@@ -58,6 +65,16 @@ _DATE_PATTERNS = [
     # _YYMMDD  e.g. -260511  (6 digits → 20YY)
     (re.compile(r'[_-](\d{2})(\d{2})(\d{2})$'), 'yymmdd'),
 ]
+
+
+def _extract_topic(doc_name: str, series_name: str | None) -> str:
+    """Derive a clean human-readable topic label from the folder/series name.
+
+    Uses series_name when available (already has the date stripped), otherwise
+    falls back to doc_name. Underscores and hyphens become spaces.
+    """
+    base = series_name if series_name else doc_name
+    return re.sub(r'[\s_-]+', ' ', base).strip()
 
 
 def _parse_series(doc_name: str) -> tuple[str | None, date | None]:
@@ -179,8 +196,9 @@ def build_index(pdf_files_dir: Path = PDF_FILES_DIR, reset: bool = False) -> Non
             continue
 
         series_name, series_date = _parse_series(doc_name)
+        topic = _extract_topic(doc_name, series_name)
         print(f"  Indexing: {doc_name[:60]}"
-              + (f"  [series: {series_name}  date: {series_date}]" if series_name else ""))
+              + (f"  [topic: {topic}  date: {series_date}]" if series_name else f"  [topic: {topic}]"))
 
         text = md_path.read_text(encoding="utf-8")
         chunks = _split_by_h2(text, doc_name)
@@ -194,6 +212,7 @@ def build_index(pdf_files_dir: Path = PDF_FILES_DIR, reset: bool = False) -> Non
                     "source": str(md_path),
                     "section": c["section"],
                     "images": ",".join(c["images"]),
+                    "topic": topic,
                     "series_name": series_name or "",
                     "series_date": series_date.isoformat() if series_date else "",
                 }
@@ -206,6 +225,7 @@ def build_index(pdf_files_dir: Path = PDF_FILES_DIR, reset: bool = False) -> Non
             "source": str(md_path),
             "chunks": len(chunks),
             "indexed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "topic": topic,
             "series_name": series_name or "",
             "series_date": series_date.isoformat() if series_date else "",
         })
@@ -216,33 +236,28 @@ def build_index(pdf_files_dir: Path = PDF_FILES_DIR, reset: bool = False) -> Non
 
 
 def list_docs() -> None:
-    """Print every document recorded in the index manifest, grouped by series."""
+    """Print every document recorded in the index manifest, grouped by topic."""
     manifest = _load_manifest()
     docs = manifest.get("docs", [])
     if not docs:
         print(f"No documents indexed yet. Manifest: {MANIFEST_PATH}")
         return
 
-    # Compute latest per series
     latest_map = _compute_series_info(manifest)
 
-    series_docs: dict[str, list[dict]] = {}
-    standalone: list[dict] = []
+    by_topic: dict[str, list[dict]] = {}
     for d in docs:
-        sn = d.get("series_name")
-        if sn:
-            series_docs.setdefault(sn, []).append(d)
-        else:
-            standalone.append(d)
+        topic = d.get("topic") or _extract_topic(d["doc_name"], d.get("series_name") or None)
+        by_topic.setdefault(topic, []).append(d)
 
     total_chunks = sum(d["chunks"] for d in docs)
     print(f"{len(docs)} document(s) indexed — {total_chunks} total chunks:\n")
 
-    for sn, members in sorted(series_docs.items()):
-        print(f"  Series: {sn}")
-        for d in sorted(members, key=lambda x: x.get("series_date", ""), reverse=True):
-            tag = " ← latest" if latest_map.get(sn) == d["doc_name"] else ""
-            print(f"    {d['chunks']:>4} chunks  [{d['series_date']}]{tag}  {d['doc_name']}")
-
-    for d in sorted(standalone, key=lambda x: x["doc_name"]):
-        print(f"  {d['chunks']:>4} chunks  [{d['indexed_at']}]  {d['doc_name']}")
+    for topic in sorted(by_topic.keys()):
+        tdocs = by_topic[topic]
+        print(f"  Topic: {topic}")
+        for d in sorted(tdocs, key=lambda x: x.get("series_date", "") or x.get("indexed_at", ""), reverse=True):
+            sn = d.get("series_name", "")
+            tag = " ← latest" if (sn and latest_map.get(sn) == d["doc_name"]) else ""
+            date_str = d["series_date"] if d.get("series_date") else d["indexed_at"][:10]
+            print(f"    {d['chunks']:>4} chunks  [{date_str}]{tag}  {d['doc_name']}")
