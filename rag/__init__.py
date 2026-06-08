@@ -37,7 +37,7 @@ from rag.agent.service import RAGAgent
 from rag.eval.service import EvalService
 from rag.indexer.service import build_index, delete_doc, list_docs, reindex_doc
 from rag.query.service import RAGRetriever
-from rag.skills.oil_market import OilMarketSummaryAgent
+from rag.specialists.oil_market import OilMarketSummaryAgent
 
 __all__ = [
     "RAGAgent",

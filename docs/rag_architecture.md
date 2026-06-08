@@ -102,7 +102,7 @@ User question
 Final answer + token usage summary
 ```
 
-### 2.3 Oil Market Skill (structured output variant)
+### 2.3 Oil Market Specialist (structured output variant)
 
 Instead of a single query, the `OilMarketSummaryAgent` runs **six** sub-queries
 in sequence — one per product category (crude, heavy, middle distillates, light

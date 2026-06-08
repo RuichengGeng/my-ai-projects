@@ -1,35 +1,12 @@
-"""
-Lightweight token-usage tracker for DeepSeek / OpenAI-compatible API calls.
-
-Usage pattern
--------------
-Every agent sets the active tracker at the start of a run via a context
-variable so _deepseek() can record without the tracker being threaded through
-every function signature:
-
-    from rag.utils.token_tracker import UsageTracker, set_active_tracker
-
-    tracker = UsageTracker()
-    with set_active_tracker(tracker):
-        ...  # all _deepseek() calls inside here are recorded
-    tracker.print_summary()
-    tracker.save_jsonl(USAGE_LOG_PATH, metadata={"question": "..."})
-
-Call sites pass a short label so the breakdown shows per-step costs:
-    _deepseek([...], label="plan")
-"""
+"""Lightweight token-usage tracker for DeepSeek / OpenAI-compatible API calls."""
 
 import json
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-
-# ---------------------------------------------------------------------------
-# Per-call record
-# ---------------------------------------------------------------------------
 
 @dataclass
 class _CallRecord:
@@ -43,17 +20,12 @@ class _CallRecord:
         return self.prompt_tokens + self.completion_tokens
 
 
-# ---------------------------------------------------------------------------
-# Tracker
-# ---------------------------------------------------------------------------
-
 class UsageTracker:
     """Accumulates token usage and estimates cost for one agent run."""
 
     # DeepSeek Chat (deepseek-chat = DeepSeek-V3) pricing, USD per million tokens.
-    # Update if DeepSeek changes pricing: https://platform.deepseek.com/api-docs/pricing
-    PRICE_INPUT_PER_M:  float = 0.27   # cache miss
-    PRICE_CACHED_PER_M: float = 0.07   # cache hit
+    PRICE_INPUT_PER_M: float = 0.27
+    PRICE_CACHED_PER_M: float = 0.07
     PRICE_OUTPUT_PER_M: float = 1.10
 
     def __init__(self) -> None:
@@ -63,8 +35,6 @@ class UsageTracker:
         """Record token counts from an API response usage object."""
         if usage is None:
             return
-        # DeepSeek exposes cache hits as prompt_cache_hit_tokens;
-        # newer OpenAI SDK exposes them under usage.prompt_tokens_details.cached_tokens
         cached = (
             getattr(usage, "prompt_cache_hit_tokens", 0)
             or getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", 0)
@@ -79,8 +49,6 @@ class UsageTracker:
 
     def reset(self) -> None:
         self._calls.clear()
-
-    # ── Aggregates ──────────────────────────────────────────────────────────
 
     @property
     def total_calls(self) -> int:
@@ -106,28 +74,30 @@ class UsageTracker:
     def estimated_cost_usd(self) -> float:
         uncached = max(0, self.total_prompt_tokens - self.total_cached_tokens)
         return (
-            uncached                    * self.PRICE_INPUT_PER_M  / 1_000_000
-            + self.total_cached_tokens  * self.PRICE_CACHED_PER_M / 1_000_000
+            uncached * self.PRICE_INPUT_PER_M / 1_000_000
+            + self.total_cached_tokens * self.PRICE_CACHED_PER_M / 1_000_000
             + self.total_completion_tokens * self.PRICE_OUTPUT_PER_M / 1_000_000
         )
 
     def breakdown(self) -> dict[str, dict]:
-        """Return per-label aggregates: {label: {calls, prompt_tokens, completion_tokens}}."""
+        """Return per-label aggregates."""
         result: dict[str, dict] = {}
         for c in self._calls:
             key = c.label or "unknown"
-            bucket = result.setdefault(key, {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0})
+            bucket = result.setdefault(
+                key,
+                {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0},
+            )
             bucket["calls"] += 1
             bucket["prompt_tokens"] += c.prompt_tokens
             bucket["completion_tokens"] += c.completion_tokens
         return result
 
-    # ── Output ──────────────────────────────────────────────────────────────
-
     def print_summary(self) -> None:
-        print(f"\n{'─' * 52}")
+        sep = "-" * 52
+        print(f"\n{sep}")
         print("  Token usage")
-        print(f"{'─' * 52}")
+        print(sep)
         print(f"  LLM calls          : {self.total_calls}")
         print(f"  Prompt tokens      : {self.total_prompt_tokens:>10,}  "
               f"(cached: {self.total_cached_tokens:,})")
@@ -135,11 +105,11 @@ class UsageTracker:
         print(f"  Total tokens       : {self.total_tokens:>10,}")
         print(f"  Estimated cost     : ${self.estimated_cost_usd:.5f}")
         if self._calls:
-            print("  ── by step ─────────────────────────────────────")
+            print("  -- by step --------------------------------")
             for label, s in self.breakdown().items():
                 print(f"    {label:<22} calls={s['calls']}  "
                       f"in={s['prompt_tokens']:,}  out={s['completion_tokens']:,}")
-        print(f"{'─' * 52}\n")
+        print(f"{sep}\n")
 
     def to_dict(self) -> dict:
         return {
@@ -173,10 +143,6 @@ class UsageTracker:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
-# ---------------------------------------------------------------------------
-# Context variable — one active tracker per async/thread context
-# ---------------------------------------------------------------------------
-
 _active_tracker: ContextVar[UsageTracker | None] = ContextVar(
     "_active_tracker", default=None
 )
@@ -188,7 +154,7 @@ def get_active_tracker() -> UsageTracker | None:
 
 @contextmanager
 def set_active_tracker(tracker: UsageTracker):
-    """Context manager that activates a tracker for the duration of the block."""
+    """Activate a tracker for the duration of the block."""
     token = _active_tracker.set(tracker)
     try:
         yield tracker

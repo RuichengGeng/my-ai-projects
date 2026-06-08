@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from rag.skills.oil_market import OilMarketSummaryAgent
+from rag.specialists.oil_market import OilMarketSummaryAgent
 
 # ── Configure here ────────────────────────────────────────────────────────────
 QUESTION = "Summarize last week's APAC oil market update"
