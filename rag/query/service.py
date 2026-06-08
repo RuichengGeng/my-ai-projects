@@ -133,6 +133,11 @@ class RAGRetriever:
         else:
             candidates = candidates[:n_results]
 
+        # Ensure every result has a 'score' field (BM25-only chunks may lack it)
+        for c in candidates:
+            if "score" not in c:
+                c["score"] = c.get("rrf_score", 0.0)
+
         return candidates
 
     def ask(self, question: str, n_results: int = 5, topic: str = "") -> str:
