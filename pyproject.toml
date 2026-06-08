@@ -32,7 +32,6 @@ dependencies = [
     "stockstats>=0.6.5",
     "typing-extensions>=4.14.0",
     "yfinance>=0.2.63",
-    "tradingagents",
     # --- pdf_parser dependencies ---
     "pypdf>=4.0.0",
     "python-dotenv>=1.0.0",
