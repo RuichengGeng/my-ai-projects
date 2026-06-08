@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from rag.agent.service import RAGAgent
 
 # ── Configure here ────────────────────────────────────────────────────────────
-QUESTION = "Summarize market update for Crude Oil Marketwire from June onwards?"
+QUESTION = "Summarize market update for Crude Oil Marketwire for last week?"
 N_RESULTS = 5      # chunks retrieved per iteration
 MAX_ITERATIONS = 3  # max retrieval-generate-evaluate loops
 # ─────────────────────────────────────────────────────────────────────────────
