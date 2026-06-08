@@ -37,7 +37,8 @@ from rag.query.service import RAGRetriever
 class AgentState(TypedDict):
     question: str
     query: str               # current retrieval query (refined each loop)
-    series_filter: str       # series_name to filter on, or ""
+    topic_filter: str        # topic label to filter on, or ""
+    series_filter: str       # series_name to filter on (within a topic), or ""
     doc_filter: str          # specific doc_name to filter on, or ""
     chunks: list[dict]
     context: str             # formatted context string
@@ -78,45 +79,71 @@ def _json(text: str) -> dict:
 # ---------------------------------------------------------------------------
 
 def _plan(state: AgentState) -> dict:
-    """Identify whether the question targets a specific series."""
+    """Identify whether the question targets a specific topic and/or series."""
+    _empty = {"topic_filter": "", "series_filter": "", "doc_filter": "", "query": state["question"]}
     if not MANIFEST_PATH.exists():
-        return {"series_filter": "", "doc_filter": "", "query": state["question"]}
+        return _empty
 
     manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-    series_set = sorted({
-        d["series_name"] for d in manifest["docs"] if d.get("series_name")
-    })
+    docs = manifest.get("docs", [])
+    if not docs:
+        return _empty
 
-    if not series_set:
-        return {"series_filter": "", "doc_filter": "", "query": state["question"]}
+    # Build topic → docs mapping and topic → series_name mapping
+    topic_docs: dict[str, list[dict]] = {}
+    topic_series: dict[str, str] = {}
+    for d in docs:
+        topic = d.get("topic", "")
+        if not topic:
+            continue
+        topic_docs.setdefault(topic, []).append(d)
+        sn = d.get("series_name", "")
+        if sn:
+            topic_series[topic] = sn
+
+    if not topic_docs:
+        return _empty
+
+    # Build a concise description of each topic for the LLM
+    topic_lines = []
+    for t in sorted(topic_docs.keys()):
+        tdocs = topic_docs[t]
+        dated = [d["series_date"] for d in tdocs if d.get("series_date")]
+        if dated:
+            topic_lines.append(f"  - {t}  ({len(tdocs)} reports, latest: {max(dated)})")
+        else:
+            topic_lines.append(f"  - {t}  (standalone)")
 
     prompt = (
-        f"Available document series:\n"
-        + "\n".join(f"  - {s}" for s in series_set)
+        "Available document topics:\n"
+        + "\n".join(topic_lines)
         + f"\n\nQuestion: {state['question']}\n\n"
-        "Does this question target one of the series above? "
-        "If yes, also say whether the user wants the LATEST report or all reports in the series. "
-        'Respond with JSON only: {"series": "<name or empty string>", "latest_only": true/false}'
+        "Does this question target one of the topics above? "
+        "If yes, also say whether the user wants the LATEST report or all reports in that topic. "
+        'Respond with JSON only: {"topic": "<exact topic name or empty string>", "latest_only": true/false}'
     )
 
     try:
         result = _json(_deepseek([{"role": "user", "content": prompt}]))
-        series = result.get("series", "").strip()
+        topic = result.get("topic", "").strip()
         latest_only = result.get("latest_only", False)
 
+        series_filter = topic_series.get(topic, "") if topic else ""
         doc_filter = ""
-        if series and latest_only:
-            # Find the latest doc in this series from the manifest
-            candidates = [d for d in manifest["docs"] if d.get("series_name") == series]
+
+        if topic and latest_only and topic in topic_docs:
+            candidates = [d for d in topic_docs[topic] if d.get("series_date")]
             if candidates:
                 newest = max(candidates, key=lambda d: d.get("series_date") or "")
                 doc_filter = newest["doc_name"]
+                series_filter = ""  # doc_filter is more specific
 
-        print(f"  [plan] series={series or 'all'}  latest_only={latest_only}"
-              + (f"  → doc_filter={doc_filter[:40]}" if doc_filter else ""))
-        return {"series_filter": series, "doc_filter": doc_filter, "query": state["question"]}
+        print(f"  [plan] topic={topic or 'all'}  latest_only={latest_only}"
+              + (f"  → doc_filter={doc_filter[:50]}" if doc_filter else
+                 f"  → series_filter={series_filter}" if series_filter else ""))
+        return {"topic_filter": topic, "series_filter": series_filter, "doc_filter": doc_filter, "query": state["question"]}
     except Exception:
-        return {"series_filter": "", "doc_filter": "", "query": state["question"]}
+        return _empty
 
 
 def _retrieve(state: AgentState, retriever: RAGRetriever, n_results: int) -> dict:
@@ -125,6 +152,8 @@ def _retrieve(state: AgentState, retriever: RAGRetriever, n_results: int) -> dic
         where = {"doc_name": {"$eq": state["doc_filter"]}}
     elif state["series_filter"]:
         where = {"series_name": {"$eq": state["series_filter"]}}
+    elif state["topic_filter"]:
+        where = {"topic": {"$eq": state["topic_filter"]}}
 
     try:
         results = retriever.collection.query(
@@ -260,6 +289,7 @@ class RAGAgent:
         result = self._graph.invoke({
             "question": question,
             "query": question,
+            "topic_filter": "",
             "series_filter": "",
             "doc_filter": "",
             "chunks": [],

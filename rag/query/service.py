@@ -17,17 +17,21 @@ class RAGRetriever:
             embedding_function=ef,
         )
 
-    def retrieve(self, question: str, n_results: int = 5) -> list[dict]:
+    def retrieve(self, question: str, n_results: int = 5, topic: str = "") -> list[dict]:
         """Return the top-n most relevant chunks for a question.
 
         Each result dict has:
           text      – chunk content
-          metadata  – doc_name, section, source, images
+          metadata  – doc_name, section, source, images, topic
           score     – cosine similarity (1 = identical, 0 = orthogonal)
+
+        Pass topic to restrict results to a single topic category.
         """
+        where = {"topic": {"$eq": topic}} if topic else None
         results = self.collection.query(
             query_texts=[question],
             n_results=n_results,
+            where=where,
             include=["documents", "metadatas", "distances"],
         )
         return [
@@ -43,11 +47,14 @@ class RAGRetriever:
             )
         ]
 
-    def ask(self, question: str, n_results: int = 5) -> str:
-        """Retrieve relevant chunks and generate an answer with DeepSeek."""
+    def ask(self, question: str, n_results: int = 5, topic: str = "") -> str:
+        """Retrieve relevant chunks and generate an answer with DeepSeek.
+
+        Pass topic to restrict retrieval to a single topic category.
+        """
         from openai import OpenAI
 
-        chunks = self.retrieve(question, n_results)
+        chunks = self.retrieve(question, n_results, topic=topic)
         context = "\n\n---\n\n".join(
             f"[{c['metadata']['doc_name']} / {c['metadata']['section']}]\n{c['text']}"
             for c in chunks
