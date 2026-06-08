@@ -178,6 +178,11 @@ def _plan(state: AgentState) -> dict:
                     for d in sorted(candidates, key=lambda x: x.get("series_date") or "")
                 ]
                 series_filter = ""
+            else:
+                # No docs fall in the requested window — clear date fields and
+                # fall back to the full series so the generator can say nothing
+                # was found rather than silently returning unrelated results.
+                date_from = date_to = ""
 
         elif scope != "date_range":
             date_from = date_to = ""
