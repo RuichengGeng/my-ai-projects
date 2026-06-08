@@ -35,7 +35,7 @@ For use outside this package:
 
 from rag.agent.service import RAGAgent
 from rag.eval.service import EvalService
-from rag.indexer.service import build_index, list_docs
+from rag.indexer.service import build_index, delete_doc, list_docs, reindex_doc
 from rag.query.service import RAGRetriever
 from rag.skills.oil_market import OilMarketSummaryAgent
 
@@ -46,4 +46,6 @@ __all__ = [
     "EvalService",
     "build_index",
     "list_docs",
+    "delete_doc",
+    "reindex_doc",
 ]

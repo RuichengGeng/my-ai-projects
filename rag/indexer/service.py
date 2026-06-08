@@ -151,6 +151,50 @@ def _split_by_h2(text: str, doc_name: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Private indexing helper (shared by build_index and reindex_doc)
+# ---------------------------------------------------------------------------
+
+def _index_one_doc(doc_name: str, md_path: Path, collection, manifest: dict) -> int:
+    """Chunk and embed a single document; append to manifest. Returns chunk count."""
+    series_name, series_date = _parse_series(doc_name)
+    topic = _extract_topic(doc_name, series_name)
+    print(f"  Indexing: {doc_name[:60]}"
+          + (f"  [topic: {topic}  date: {series_date}]" if series_name else f"  [topic: {topic}]"))
+
+    text = md_path.read_text(encoding="utf-8")
+    chunks = _split_by_h2(text, doc_name)
+
+    collection.add(
+        ids=[f"{doc_name}::{i}" for i in range(len(chunks))],
+        documents=[c["text"] for c in chunks],
+        metadatas=[
+            {
+                "doc_name": doc_name,
+                "source": str(md_path),
+                "section": c["section"],
+                "images": ",".join(c["images"]),
+                "topic": topic,
+                "series_name": series_name or "",
+                "series_date": series_date.isoformat() if series_date else "",
+            }
+            for c in chunks
+        ],
+    )
+
+    manifest["docs"].append({
+        "doc_name": doc_name,
+        "source": str(md_path),
+        "chunks": len(chunks),
+        "indexed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "topic": topic,
+        "series_name": series_name or "",
+        "series_date": series_date.isoformat() if series_date else "",
+    })
+    print(f"    {len(chunks)} chunks added")
+    return len(chunks)
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -195,42 +239,8 @@ def build_index(pdf_files_dir: Path = PDF_FILES_DIR, reset: bool = False) -> Non
             print(f"  Skipping (already indexed): {doc_name[:60]}")
             continue
 
-        series_name, series_date = _parse_series(doc_name)
-        topic = _extract_topic(doc_name, series_name)
-        print(f"  Indexing: {doc_name[:60]}"
-              + (f"  [topic: {topic}  date: {series_date}]" if series_name else f"  [topic: {topic}]"))
-
-        text = md_path.read_text(encoding="utf-8")
-        chunks = _split_by_h2(text, doc_name)
-
-        collection.add(
-            ids=[f"{doc_name}::{i}" for i in range(len(chunks))],
-            documents=[c["text"] for c in chunks],
-            metadatas=[
-                {
-                    "doc_name": doc_name,
-                    "source": str(md_path),
-                    "section": c["section"],
-                    "images": ",".join(c["images"]),
-                    "topic": topic,
-                    "series_name": series_name or "",
-                    "series_date": series_date.isoformat() if series_date else "",
-                }
-                for c in chunks
-            ],
-        )
-
-        manifest["docs"].append({
-            "doc_name": doc_name,
-            "source": str(md_path),
-            "chunks": len(chunks),
-            "indexed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "topic": topic,
-            "series_name": series_name or "",
-            "series_date": series_date.isoformat() if series_date else "",
-        })
+        _index_one_doc(doc_name, md_path, collection, manifest)
         _save_manifest(manifest)
-        print(f"    {len(chunks)} chunks added")
 
     print(f"\nIndex ready — {collection.count()} total chunks at {CHROMA_PATH}")
 
@@ -261,3 +271,57 @@ def list_docs() -> None:
             tag = " ← latest" if (sn and latest_map.get(sn) == d["doc_name"]) else ""
             date_str = d["series_date"] if d.get("series_date") else d["indexed_at"][:10]
             print(f"    {d['chunks']:>4} chunks  [{date_str}]{tag}  {d['doc_name']}")
+
+
+def delete_doc(doc_name: str) -> bool:
+    """Remove a document's chunks from ChromaDB and its entry from the manifest.
+
+    Returns True if the document was found and deleted, False if it was not indexed.
+    """
+    manifest = _load_manifest()
+    before = len(manifest["docs"])
+    manifest["docs"] = [d for d in manifest["docs"] if d["doc_name"] != doc_name]
+
+    if len(manifest["docs"]) == before:
+        print(f"  '{doc_name}' not found in manifest — nothing deleted")
+        return False
+
+    ef = SentenceTransformerEmbeddingFunction(model_name=EMBED_MODEL)
+    client = chromadb.PersistentClient(path=str(CHROMA_PATH))
+    try:
+        collection = client.get_collection(name=COLLECTION_NAME, embedding_function=ef)
+        collection.delete(where={"doc_name": {"$eq": doc_name}})
+        print(f"  Deleted ChromaDB chunks for '{doc_name}'")
+    except Exception as exc:
+        print(f"  Warning: could not delete from ChromaDB: {exc}")
+
+    _save_manifest(manifest)
+    print(f"  Removed '{doc_name}' from manifest")
+    return True
+
+
+def reindex_doc(doc_name: str, pdf_files_dir: Path = PDF_FILES_DIR) -> bool:
+    """Delete and re-index a single document (use when its content has been updated).
+
+    Returns True on success, False if the source file could not be found.
+    """
+    md_path = pdf_files_dir / doc_name / f"{doc_name}.md"
+    if not md_path.exists():
+        print(f"  Source file not found: {md_path}")
+        return False
+
+    print(f"Re-indexing '{doc_name}' …")
+    delete_doc(doc_name)
+
+    ef = SentenceTransformerEmbeddingFunction(model_name=EMBED_MODEL)
+    client = chromadb.PersistentClient(path=str(CHROMA_PATH))
+    collection = client.get_or_create_collection(
+        name=COLLECTION_NAME,
+        embedding_function=ef,
+        metadata={"hnsw:space": "cosine"},
+    )
+
+    manifest = _load_manifest()
+    _index_one_doc(doc_name, md_path, collection, manifest)
+    _save_manifest(manifest)
+    return True
