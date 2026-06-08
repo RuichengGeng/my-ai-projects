@@ -124,7 +124,7 @@ def _compute_series_info(manifest: dict) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 def _find_md_files(root: Path) -> list[Path]:
-    return sorted(root.glob("*/*.md"))
+    return sorted(root.rglob("*.md"))
 
 
 def _split_by_h2(text: str, doc_name: str) -> list[dict]:

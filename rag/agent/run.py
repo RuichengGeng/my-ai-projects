@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from rag.agent.service import RAGAgent
 
 # ── Configure here ────────────────────────────────────────────────────────────
-QUESTION = "What is the latest market update for Asia-Pacific Arab Gulf?"
+QUESTION = "Could you summarize last week market update for Asia-Pacific Arab Gulf?"
 N_RESULTS = 5      # chunks retrieved per iteration
 MAX_ITERATIONS = 3  # max retrieval-generate-evaluate loops
 # ─────────────────────────────────────────────────────────────────────────────
