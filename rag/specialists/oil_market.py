@@ -3,6 +3,13 @@
 RAGAgent owns reusable RAG capabilities: planning, retrieval, LLM generation,
 and token tracking. This specialist owns the oil-market workflow: product
 section definitions, category-scoped retrieval, and report assembly.
+
+Per-section retrieval loop
+--------------------------
+For each section: retrieve → try to generate → if the LLM finds no relevant
+content, ask it for a better query and retry. This mirrors the RAGAgent
+evaluate loop but is scoped to a single report section, so a weak first pass
+on (say) arbitrage can recover without affecting the other sections.
 """
 
 from rag.agent.service import RAGAgent
@@ -10,6 +17,7 @@ from rag.config import CONFIDENCE_THRESHOLD
 
 
 NO_RELEVANT_CONTENT = "NO_RELEVANT_CONTENT"
+MAX_SECTION_RETRIES = 2
 
 
 SECTIONS: list[dict[str, str]] = [
@@ -101,8 +109,10 @@ class OilMarketSummaryAgent:
         min_score: float = CONFIDENCE_THRESHOLD,
         use_reranker: bool = True,
         use_bm25: bool = True,
+        max_section_retries: int = MAX_SECTION_RETRIES,
     ):
         self.n_results = n_results
+        self.max_section_retries = max_section_retries
         self.rag = RAGAgent(
             n_results=n_results,
             min_score=min_score,
@@ -114,17 +124,23 @@ class OilMarketSummaryAgent:
         self.last_chunks_by_category: dict[str, list[dict]] = {}
         self.last_sections: dict[str, str] = {}
 
+    # ── Retrieval helpers ────────────────────────────────────────────────────
+
     def _query_category(self, query: str, plan: dict) -> list[dict]:
         return self.rag.retrieve(query, plan=plan, n_results=self.n_results)
 
     @staticmethod
-    def _dedupe_chunks(chunks: list[dict]) -> list[dict]:
+    def _best_score(chunk: dict) -> float:
+        """Best available relevance score across ce_score / rrf_score / score."""
+        return chunk.get("ce_score", chunk.get("rrf_score", chunk.get("score", 0.0)))
+
+    def _dedupe_chunks(self, chunks: list[dict]) -> list[dict]:
         seen: dict[str, dict] = {}
         for chunk in chunks:
             key = f"{chunk['metadata']['doc_name']}::{chunk['metadata']['section']}"
-            if key not in seen or chunk["score"] > seen[key]["score"]:
+            if key not in seen or self._best_score(chunk) > self._best_score(seen[key]):
                 seen[key] = chunk
-        return sorted(seen.values(), key=lambda c: c["score"], reverse=True)
+        return sorted(seen.values(), key=self._best_score, reverse=True)
 
     @staticmethod
     def _format_context(chunks: list[dict]) -> str:
@@ -133,10 +149,11 @@ class OilMarketSummaryAgent:
             for c in chunks
         )
 
+    # ── Generation helpers ───────────────────────────────────────────────────
+
     def _generate_section(self, section: dict[str, str], chunks: list[dict], question: str) -> str:
         if not chunks:
             return ""
-
         prompt = _SECTION_PROMPT.format(
             title=section["title"],
             instructions=section["instructions"],
@@ -154,6 +171,58 @@ class OilMarketSummaryAgent:
             return ""
         return text
 
+    def _refine_section_query(
+        self, section: dict[str, str], failed_query: str, question: str
+    ) -> str:
+        """Ask the LLM for an alternative search query for this section."""
+        prompt = (
+            f"You are helping search an oil market document database.\n"
+            f"Report scope: {question}\n"
+            f"Section needed: {section['title']}\n"
+            f"Previous search query that returned no relevant data: \"{failed_query}\"\n\n"
+            f"Suggest ONE alternative search query using different terminology that may "
+            f"find relevant {section['title'].lower()} data. "
+            "Return only the query string, no explanation."
+        )
+        return self.rag.generate(
+            prompt,
+            max_tokens=64,
+            temperature=0.4,
+            label=f"refine_{section['key']}",
+        ).strip().strip("\"'")
+
+    # ── Per-section retrieve→generate→refine loop ────────────────────────────
+
+    def _run_section(
+        self, section: dict[str, str], plan: dict, question: str
+    ) -> str:
+        """Retrieve and generate one section with query refinement on miss."""
+        query = section["query"]
+
+        for attempt in range(1, self.max_section_retries + 1):
+            chunks = self._dedupe_chunks(self._query_category(query, plan))
+            self.last_chunks_by_category[section["key"]] = chunks
+            print(
+                f"  [retrieve:{section['key']}] attempt={attempt}  "
+                f"query='{query[:55]}'  chunks={len(chunks)}"
+            )
+
+            generated = self._generate_section(section, chunks, question)
+            if generated:
+                return generated
+
+            if attempt < self.max_section_retries:
+                refined = self._refine_section_query(section, query, question)
+                if refined and refined != query:
+                    print(f"  [refine:{section['key']}]   -> '{refined[:60]}'")
+                    query = refined
+                else:
+                    break  # LLM couldn't improve on the query
+
+        return ""
+
+    # ── Public entry point ───────────────────────────────────────────────────
+
     def run(self, question: str) -> str:
         """Run the structured oil market summary pipeline and return markdown."""
         from rag.config import USAGE_LOG_PATH
@@ -166,30 +235,24 @@ class OilMarketSummaryAgent:
         self.last_plan = self.rag.plan(question)
 
         for section in SECTIONS:
-            print(f"  [retrieve:{section['key']}]  '{section['query'][:60]}'")
-            chunks = self._dedupe_chunks(self._query_category(section["query"], self.last_plan))
-            self.last_chunks_by_category[section["key"]] = chunks
-            print(f"    -> {len(chunks)} chunk(s)")
-
-        for section in SECTIONS:
-            chunks = self.last_chunks_by_category.get(section["key"], [])
-            generated = self._generate_section(section, chunks, question)
+            generated = self._run_section(section, self.last_plan, question)
             if generated:
                 self.last_sections[section["key"]] = generated
                 print(f"  [generate:{section['key']}] length={len(generated)}")
             else:
-                print(f"  [generate:{section['key']}] skipped")
+                print(f"  [generate:{section['key']}] skipped — no relevant data")
 
         if not self.last_sections:
             return "No relevant documents found for this query."
 
         answer = "\n\n".join(
-            self.last_sections[section["key"]]
-            for section in SECTIONS
-            if section["key"] in self.last_sections
+            self.last_sections[s["key"]]
+            for s in SECTIONS
+            if s["key"] in self.last_sections
         )
 
-        print(f"  [generate] final answer length={len(answer)}")
+        print(f"\n  Total sections: {len(self.last_sections)}/{len(SECTIONS)}  "
+              f"answer length={len(answer)}")
         self.tracker.print_summary()
         self.tracker.save_jsonl(
             USAGE_LOG_PATH,
