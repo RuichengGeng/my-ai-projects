@@ -43,7 +43,7 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["finance_ai*", "my_playground*", "rag*", "pdf_parser*"]
+include = ["finance_ai*", "my_playground*", "rag*", "pdf_parser*", "utils*"]
 exclude = ["kronos*", "tradingagents*"]
 
 [build-system]
