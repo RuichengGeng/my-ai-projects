@@ -92,6 +92,8 @@ class OilMarketSummaryAgent:
     def __init__(self, n_results: int = 5):
         self.n_results = n_results
         self._retriever = RAGRetriever()
+        from rag.utils.token_tracker import UsageTracker
+        self.tracker = UsageTracker()
 
     # ── ChromaDB filter helpers ──────────────────────────────────────────────
 
@@ -136,7 +138,10 @@ class OilMarketSummaryAgent:
 
     def run(self, question: str) -> str:
         """Run the structured oil market summary pipeline and return markdown."""
+        from rag.config import USAGE_LOG_PATH
+        from rag.utils.token_tracker import set_active_tracker
         print(f"\nOil market summary: {question}\n")
+        self.tracker.reset()
 
         # Step 1: detect topic / date scope using the shared plan node
         init_state: AgentState = {
@@ -156,38 +161,46 @@ class OilMarketSummaryAgent:
             "final_answer": "",
             "iteration": 0,
         }
-        plan = _plan(init_state)
-        where = self._build_where(plan)
+        with set_active_tracker(self.tracker):
+            plan = _plan(init_state)
+            where = self._build_where(plan)
 
-        # Step 2: multi-category retrieval — deduplicate by (doc, section),
-        # keeping the highest-scoring copy of any repeated chunk
-        seen: dict[str, dict] = {}
-        for category, subquery in SUB_QUERIES.items():
-            print(f"  [retrieve:{category}]  '{subquery[:60]}'")
-            for chunk in self._query_category(subquery, where):
-                key = f"{chunk['metadata']['doc_name']}::{chunk['metadata']['section']}"
-                if key not in seen or chunk["score"] > seen[key]["score"]:
-                    seen[key] = chunk
+            # Step 2: multi-category retrieval — deduplicate by (doc, section),
+            # keeping the highest-scoring copy of any repeated chunk
+            seen: dict[str, dict] = {}
+            for category, subquery in SUB_QUERIES.items():
+                print(f"  [retrieve:{category}]  '{subquery[:60]}'")
+                for chunk in self._query_category(subquery, where):
+                    key = f"{chunk['metadata']['doc_name']}::{chunk['metadata']['section']}"
+                    if key not in seen or chunk["score"] > seen[key]["score"]:
+                        seen[key] = chunk
 
-        chunks = sorted(seen.values(), key=lambda c: c["score"], reverse=True)
-        print(f"  [retrieve] {len(chunks)} unique chunks from {len(SUB_QUERIES)} sub-queries")
+            chunks = sorted(seen.values(), key=lambda c: c["score"], reverse=True)
+            print(f"  [retrieve] {len(chunks)} unique chunks from {len(SUB_QUERIES)} sub-queries")
 
-        if not chunks:
-            return "No relevant documents found for this query."
+            if not chunks:
+                return "No relevant documents found for this query."
 
-        context = "\n\n---\n\n".join(
-            f"[{c['metadata']['doc_name']} / {c['metadata']['section']}]\n{c['text']}"
-            for c in chunks
-        )
+            context = "\n\n---\n\n".join(
+                f"[{c['metadata']['doc_name']} / {c['metadata']['section']}]\n{c['text']}"
+                for c in chunks
+            )
 
-        # Step 3: structured generation
-        answer = _deepseek(
-            messages=[{
-                "role": "user",
-                "content": _STRUCTURED_PROMPT.format(context=context, question=question),
-            }],
-            max_tokens=2048,
-            temperature=0.2,
-        )
+            # Step 3: structured generation
+            answer = _deepseek(
+                messages=[{
+                    "role": "user",
+                    "content": _STRUCTURED_PROMPT.format(context=context, question=question),
+                }],
+                max_tokens=2048,
+                temperature=0.2,
+                label="generate",
+            )
+
         print(f"  [generate] answer length={len(answer)}")
+        self.tracker.print_summary()
+        self.tracker.save_jsonl(
+            USAGE_LOG_PATH,
+            {"agent": "OilMarketSummaryAgent", "question": question},
+        )
         return answer

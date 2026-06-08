@@ -19,3 +19,6 @@ MANIFEST_PATH = CHROMA_PATH / "manifest.json"
 # DeepSeek model used for answer generation (OpenAI-compatible API)
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_MODEL = "deepseek-chat"
+
+# Token usage log — one JSON line appended per agent run
+USAGE_LOG_PATH = CHROMA_PATH / "usage_log.jsonl"

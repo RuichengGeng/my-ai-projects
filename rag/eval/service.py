@@ -18,7 +18,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from rag.config import CHROMA_PATH, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
+from rag.config import CHROMA_PATH, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL, USAGE_LOG_PATH
 from rag.query.service import RAGRetriever
 
 # ---------------------------------------------------------------------------
@@ -63,8 +63,9 @@ Respond with JSON only, no markdown fences:
 # LLM helper
 # ---------------------------------------------------------------------------
 
-def _deepseek(content: str, max_tokens: int = 256) -> str:
+def _deepseek(content: str, max_tokens: int = 256, label: str = "") -> str:
     from openai import OpenAI
+    from rag.utils.token_tracker import get_active_tracker
     client = OpenAI(api_key=os.environ.get("DEEPSEEK_API_KEY"), base_url=DEEPSEEK_BASE_URL)
     resp = client.chat.completions.create(
         model=DEEPSEEK_MODEL,
@@ -72,6 +73,9 @@ def _deepseek(content: str, max_tokens: int = 256) -> str:
         temperature=0,
         messages=[{"role": "user", "content": content}],
     )
+    tracker = get_active_tracker()
+    if tracker is not None:
+        tracker.record(resp.usage, label=label)
     return resp.choices[0].message.content.strip()
 
 
@@ -91,11 +95,14 @@ class EvalService:
         self.retriever = RAGRetriever()
         self.n_results = n_results
         self._report_dir = CHROMA_PATH
+        from rag.utils.token_tracker import UsageTracker
+        self.tracker = UsageTracker()
 
     def _judge_answer(self, question: str, context: str, answer: str) -> dict:
         raw = _deepseek(
             _ANSWER_JUDGE_PROMPT.format(context=context, question=question, answer=answer),
             max_tokens=256,
+            label="judge_answer",
         )
         try:
             return _parse_json(raw)
@@ -111,6 +118,7 @@ class EvalService:
         raw = _deepseek(
             _CONTEXT_PRECISION_PROMPT.format(question=question, chunks=numbered),
             max_tokens=128,
+            label="judge_context_precision",
         )
         try:
             relevances: list[bool] = _parse_json(raw)["chunk_relevance"]
@@ -168,19 +176,22 @@ class EvalService:
 
     def run(self, test_set_path: Path) -> dict:
         """Evaluate all questions and return the full report dict."""
+        from rag.utils.token_tracker import set_active_tracker
         questions = json.loads(test_set_path.read_text(encoding="utf-8"))["questions"]
         results = []
 
-        for item in questions:
-            print(f"  [{item['id']}] ({item.get('question_type','?')}) {item['question'][:70]}")
-            r = self._eval_one(item)
-            s = r["scores"]
-            print(
-                f"         F={s.get('faithfulness')}  R={s.get('relevance')}  "
-                f"C={s.get('completeness')}  CP={s.get('context_precision')}  "
-                f"{r['latency_ms']}ms  — {s.get('reasoning','')[:70]}"
-            )
-            results.append(r)
+        self.tracker.reset()
+        with set_active_tracker(self.tracker):
+            for item in questions:
+                print(f"  [{item['id']}] ({item.get('question_type','?')}) {item['question'][:70]}")
+                r = self._eval_one(item)
+                s = r["scores"]
+                print(
+                    f"         F={s.get('faithfulness')}  R={s.get('relevance')}  "
+                    f"C={s.get('completeness')}  CP={s.get('context_precision')}  "
+                    f"{r['latency_ms']}ms  — {s.get('reasoning','')[:70]}"
+                )
+                results.append(r)
 
         return {
             "run_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -207,6 +218,11 @@ class EvalService:
             f"latency={s['avg_latency_ms']}ms"
         )
         print(f"Report → {out_path}")
+        self.tracker.print_summary()
+        self.tracker.save_jsonl(
+            USAGE_LOG_PATH,
+            {"agent": "EvalService", "test_set": str(test_set_path), "n_questions": n},
+        )
         return out_path
 
 

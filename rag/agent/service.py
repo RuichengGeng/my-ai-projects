@@ -28,7 +28,7 @@ from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from rag.config import CHROMA_PATH, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL, MANIFEST_PATH
+from rag.config import CHROMA_PATH, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL, MANIFEST_PATH, USAGE_LOG_PATH
 from rag.query.service import RAGRetriever
 
 # ---------------------------------------------------------------------------
@@ -57,8 +57,10 @@ class AgentState(TypedDict):
 # LLM helper
 # ---------------------------------------------------------------------------
 
-def _deepseek(messages: list[dict], max_tokens: int = 512, temperature: float = 0) -> str:
+def _deepseek(messages: list[dict], max_tokens: int = 512, temperature: float = 0,
+              label: str = "") -> str:
     from openai import OpenAI
+    from rag.utils.token_tracker import get_active_tracker
     client = OpenAI(api_key=os.environ.get("DEEPSEEK_API_KEY"), base_url=DEEPSEEK_BASE_URL)
     resp = client.chat.completions.create(
         model=DEEPSEEK_MODEL,
@@ -66,6 +68,9 @@ def _deepseek(messages: list[dict], max_tokens: int = 512, temperature: float = 
         temperature=temperature,
         messages=messages,
     )
+    tracker = get_active_tracker()
+    if tracker is not None:
+        tracker.record(resp.usage, label=label)
     return resp.choices[0].message.content.strip()
 
 
@@ -142,7 +147,7 @@ def _plan(state: AgentState) -> dict:
     )
 
     try:
-        result = _json(_deepseek([{"role": "user", "content": prompt}]))
+        result = _json(_deepseek([{"role": "user", "content": prompt}], label="plan"))
         topic = result.get("topic", "").strip()
         scope = result.get("scope", "all")
         date_from = result.get("date_from", "").strip()
@@ -275,6 +280,7 @@ def _generate(state: AgentState) -> dict:
         }],
         max_tokens=1024,
         temperature=0.2,
+        label="generate",
     )
     print(f"  [generate] answer length={len(answer)}")
     return {"draft_answer": answer}
@@ -297,6 +303,7 @@ def _evaluate(state: AgentState) -> dict:
             ),
         }],
         max_tokens=256,
+        label="evaluate",
     )
     try:
         parsed = _json(result)
@@ -336,6 +343,8 @@ class RAGAgent:
         self.max_iterations = max_iterations
         self._retriever = RAGRetriever()
         self._graph = self._build_graph()
+        from rag.utils.token_tracker import UsageTracker
+        self.tracker = UsageTracker()
 
     def _build_graph(self):
         n = self.n_results
@@ -361,23 +370,29 @@ class RAGAgent:
 
     def run(self, question: str) -> str:
         """Run the full agent loop and return the final answer."""
+        from rag.utils.token_tracker import set_active_tracker
         print(f"\nAgent question: {question}\n")
-        result = self._graph.invoke({
-            "question": question,
-            "query": question,
-            "topic_filter": "",
-            "series_filter": "",
-            "doc_filter": "",
-            "doc_filters": [],
-            "date_from": "",
-            "date_to": "",
-            "chunks": [],
-            "context": "",
-            "draft_answer": "",
-            "complete": False,
-            "missing": "",
-            "final_answer": "",
-            "iteration": 0,
-        })
+        self.tracker.reset()
+        with set_active_tracker(self.tracker):
+            result = self._graph.invoke({
+                "question": question,
+                "query": question,
+                "topic_filter": "",
+                "series_filter": "",
+                "doc_filter": "",
+                "doc_filters": [],
+                "date_from": "",
+                "date_to": "",
+                "chunks": [],
+                "context": "",
+                "draft_answer": "",
+                "complete": False,
+                "missing": "",
+                "final_answer": "",
+                "iteration": 0,
+            })
         # If loop exited on max_iterations without completing, use the last draft
-        return result["final_answer"] or result["draft_answer"]
+        answer = result["final_answer"] or result["draft_answer"]
+        self.tracker.print_summary()
+        self.tracker.save_jsonl(USAGE_LOG_PATH, {"agent": "RAGAgent", "question": question})
+        return answer
