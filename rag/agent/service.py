@@ -28,7 +28,10 @@ from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from rag.config import CHROMA_PATH, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL, MANIFEST_PATH, USAGE_LOG_PATH
+from rag.config import (
+    CHROMA_PATH, CONFIDENCE_THRESHOLD, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL,
+    MANIFEST_PATH, USAGE_LOG_PATH,
+)
 from rag.query.service import RAGRetriever
 
 # ---------------------------------------------------------------------------
@@ -217,49 +220,25 @@ def _plan(state: AgentState) -> dict:
         return _empty
 
 
-def _retrieve(state: AgentState, retriever: RAGRetriever, n_results: int) -> dict:
-    where: dict | None = None
+def _build_where(state: AgentState) -> "dict | None":
+    """Translate agent state into a ChromaDB/BM25 where filter."""
     if state["doc_filter"]:
-        where = {"doc_name": {"$eq": state["doc_filter"]}}
-    elif state["doc_filters"]:
-        if len(state["doc_filters"]) == 1:
-            where = {"doc_name": {"$eq": state["doc_filters"][0]}}
-        else:
-            where = {"doc_name": {"$in": state["doc_filters"]}}
-    elif state["date_from"] and state["series_filter"]:
+        return {"doc_name": {"$eq": state["doc_filter"]}}
+    if state["doc_filters"]:
+        df = state["doc_filters"]
+        return {"doc_name": {"$eq": df[0]}} if len(df) == 1 else {"doc_name": {"$in": df}}
+    if state["series_filter"]:
         # Chroma range operators only support numeric metadata. series_date is
-        # stored as an ISO string, so date ranges should normally be converted
-        # to doc_filters in _plan. Fall back to the series rather than using an
-        # invalid string $gte/$lte filter.
-        where = {"series_name": {"$eq": state["series_filter"]}}
-    elif state["series_filter"]:
-        where = {"series_name": {"$eq": state["series_filter"]}}
-    elif state["topic_filter"]:
-        where = {"topic": {"$eq": state["topic_filter"]}}
+        # stored as an ISO string, so date ranges are handled via doc_filters.
+        return {"series_name": {"$eq": state["series_filter"]}}
+    if state["topic_filter"]:
+        return {"topic": {"$eq": state["topic_filter"]}}
+    return None
 
-    try:
-        results = retriever.collection.query(
-            query_texts=[state["query"]],
-            n_results=n_results,
-            where=where,
-            include=["documents", "metadatas", "distances"],
-        )
-    except Exception:
-        # Filter matched nothing — fall back to unfiltered search
-        print(f"  [retrieve] filter matched nothing, falling back to unfiltered search")
-        results = retriever.collection.query(
-            query_texts=[state["query"]],
-            n_results=n_results,
-            include=["documents", "metadatas", "distances"],
-        )
-    chunks = [
-        {"text": doc, "metadata": meta, "score": round(1 - dist, 4)}
-        for doc, meta, dist in zip(
-            results["documents"][0],
-            results["metadatas"][0],
-            results["distances"][0],
-        )
-    ]
+
+def _retrieve(state: AgentState, retriever: RAGRetriever, n_results: int) -> dict:
+    where = _build_where(state)
+    chunks = retriever.retrieve(state["query"], n_results=n_results, where=where)
     context = "\n\n---\n\n".join(
         f"[{c['metadata']['doc_name']} / {c['metadata']['section']}]\n{c['text']}"
         for c in chunks
@@ -339,10 +318,21 @@ def _should_continue(state: AgentState, max_iterations: int) -> str:
 # ---------------------------------------------------------------------------
 
 class RAGAgent:
-    def __init__(self, n_results: int = 5, max_iterations: int = 3):
+    def __init__(
+        self,
+        n_results: int = 5,
+        max_iterations: int = 3,
+        min_score: float = CONFIDENCE_THRESHOLD,
+        use_reranker: bool = True,
+        use_bm25: bool = True,
+    ):
         self.n_results = n_results
         self.max_iterations = max_iterations
-        self._retriever = RAGRetriever()
+        self._retriever = RAGRetriever(
+            min_score=min_score,
+            use_reranker=use_reranker,
+            use_bm25=use_bm25,
+        )
         self._graph = self._build_graph()
         from rag.utils.token_tracker import UsageTracker
         self.tracker = UsageTracker()
