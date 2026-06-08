@@ -1,0 +1,24 @@
+{
+  "questions": [
+    {
+      "id": "q1",
+      "question": "How should a portfolio manager hedge against inflation using commodities?"
+    },
+    {
+      "id": "q2",
+      "question": "What is the role of inventory in determining commodity spot prices?"
+    },
+    {
+      "id": "q3",
+      "question": "Why are commodity-linked equities not a substitute for direct commodity exposure?"
+    },
+    {
+      "id": "q4",
+      "question": "What is roll yield and how does it affect commodity returns?"
+    },
+    {
+      "id": "q5",
+      "question": "How does gold differ from other commodities as an inflation hedge?"
+    }
+  ]
+}

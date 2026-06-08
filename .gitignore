@@ -15,3 +15,18 @@ venv/
 # Build
 dist/
 build/
+
+**.xml
+
+.vscode/
+.pi/
+
+**.pdf
+
+# RAG vector store
+rag_store/
+
+# Parsed PDF output (markdown + images)
+pdf_parser/pdf_files/
+
+.claude/
