@@ -1,24 +1,10 @@
-"""
-Agentic RAG using LangGraph.
+"""General-purpose agentic RAG engine using LangGraph.
 
-Graph
------
-START → plan → retrieve → generate → evaluate ──► END
-                  ▲                      │
-                  └──── (if incomplete) ──┘
-
-Nodes
------
-plan      Reads the manifest and asks DeepSeek whether the question targets a
-          specific document series. Sets series_filter and the initial query.
-
-retrieve  Queries ChromaDB, optionally filtered by series_name or doc_name
-          (for "latest in series" queries).
-
-generate  Calls DeepSeek to produce a draft answer from the retrieved chunks.
-
-evaluate  Asks DeepSeek to score completeness. If incomplete, provides a
-          refined query for the next retrieval round.
+RAGAgent owns reusable RAG capabilities:
+- manifest-aware planning via rag.planning
+- scoped retrieval via RAGRetriever
+- LLM generation with token tracking
+- optional self-evaluation loop for general Q&A
 """
 
 import json
@@ -27,41 +13,49 @@ from typing import TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
-from rag.config import CHROMA_PATH, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL, MANIFEST_PATH
+from rag.config import CONFIDENCE_THRESHOLD, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL, USAGE_LOG_PATH
+from rag.planning import build_where, plan_retrieval_scope
 from rag.query.service import RAGRetriever
 
-# ---------------------------------------------------------------------------
-# Agent state
-# ---------------------------------------------------------------------------
 
 class AgentState(TypedDict):
     question: str
-    query: str               # current retrieval query (refined each loop)
-    topic_filter: str        # topic label to filter on, or ""
-    series_filter: str       # series_name to filter on (within a topic), or ""
-    doc_filter: str          # specific doc_name to filter on, or ""
+    query: str
+    topic_filter: str
+    series_filter: str
+    doc_filter: str
+    doc_filters: list[str]
+    date_from: str
+    date_to: str
     chunks: list[dict]
-    context: str             # formatted context string
+    context: str
     draft_answer: str
     complete: bool
-    missing: str             # what is still missing, if not complete
+    missing: str
     final_answer: str
     iteration: int
 
 
-# ---------------------------------------------------------------------------
-# LLM helper
-# ---------------------------------------------------------------------------
-
-def _deepseek(messages: list[dict], max_tokens: int = 512, temperature: float = 0) -> str:
+def _deepseek(
+    messages: list[dict],
+    max_tokens: int = 512,
+    temperature: float = 0,
+    label: str = "",
+) -> str:
     from openai import OpenAI
+    from rag.utils.token_tracker import get_active_tracker
+    from utils.retry import call_with_retry
+
     client = OpenAI(api_key=os.environ.get("DEEPSEEK_API_KEY"), base_url=DEEPSEEK_BASE_URL)
-    resp = client.chat.completions.create(
+    resp = call_with_retry(lambda: client.chat.completions.create(
         model=DEEPSEEK_MODEL,
         max_tokens=max_tokens,
         temperature=temperature,
         messages=messages,
-    )
+    ))
+    tracker = get_active_tracker()
+    if tracker is not None:
+        tracker.record(resp.usage, label=label)
     return resp.choices[0].message.content.strip()
 
 
@@ -74,115 +68,22 @@ def _json(text: str) -> dict:
     return json.loads(text)
 
 
-# ---------------------------------------------------------------------------
-# Node implementations
-# ---------------------------------------------------------------------------
-
 def _plan(state: AgentState) -> dict:
-    """Identify whether the question targets a specific topic and/or series."""
-    _empty = {"topic_filter": "", "series_filter": "", "doc_filter": "", "query": state["question"]}
-    if not MANIFEST_PATH.exists():
-        return _empty
-
-    manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
-    docs = manifest.get("docs", [])
-    if not docs:
-        return _empty
-
-    # Build topic → docs mapping and topic → series_name mapping
-    topic_docs: dict[str, list[dict]] = {}
-    topic_series: dict[str, str] = {}
-    for d in docs:
-        topic = d.get("topic", "")
-        if not topic:
-            continue
-        topic_docs.setdefault(topic, []).append(d)
-        sn = d.get("series_name", "")
-        if sn:
-            topic_series[topic] = sn
-
-    if not topic_docs:
-        return _empty
-
-    # Build a concise description of each topic for the LLM
-    topic_lines = []
-    for t in sorted(topic_docs.keys()):
-        tdocs = topic_docs[t]
-        dated = [d["series_date"] for d in tdocs if d.get("series_date")]
-        if dated:
-            topic_lines.append(f"  - {t}  ({len(tdocs)} reports, latest: {max(dated)})")
-        else:
-            topic_lines.append(f"  - {t}  (standalone)")
-
-    prompt = (
-        "Available document topics:\n"
-        + "\n".join(topic_lines)
-        + f"\n\nQuestion: {state['question']}\n\n"
-        "Does this question target one of the topics above? "
-        "If yes, also say whether the user wants the LATEST report or all reports in that topic. "
-        'Respond with JSON only: {"topic": "<exact topic name or empty string>", "latest_only": true/false}'
-    )
-
-    try:
-        result = _json(_deepseek([{"role": "user", "content": prompt}]))
-        topic = result.get("topic", "").strip()
-        latest_only = result.get("latest_only", False)
-
-        series_filter = topic_series.get(topic, "") if topic else ""
-        doc_filter = ""
-
-        if topic and latest_only and topic in topic_docs:
-            candidates = [d for d in topic_docs[topic] if d.get("series_date")]
-            if candidates:
-                newest = max(candidates, key=lambda d: d.get("series_date") or "")
-                doc_filter = newest["doc_name"]
-                series_filter = ""  # doc_filter is more specific
-
-        print(f"  [plan] topic={topic or 'all'}  latest_only={latest_only}"
-              + (f"  → doc_filter={doc_filter[:50]}" if doc_filter else
-                 f"  → series_filter={series_filter}" if series_filter else ""))
-        return {"topic_filter": topic, "series_filter": series_filter, "doc_filter": doc_filter, "query": state["question"]}
-    except Exception:
-        return _empty
+    """LangGraph adapter for shared retrieval planning."""
+    return plan_retrieval_scope(state["question"], _deepseek)
 
 
 def _retrieve(state: AgentState, retriever: RAGRetriever, n_results: int) -> dict:
-    where: dict | None = None
-    if state["doc_filter"]:
-        where = {"doc_name": {"$eq": state["doc_filter"]}}
-    elif state["series_filter"]:
-        where = {"series_name": {"$eq": state["series_filter"]}}
-    elif state["topic_filter"]:
-        where = {"topic": {"$eq": state["topic_filter"]}}
-
-    try:
-        results = retriever.collection.query(
-            query_texts=[state["query"]],
-            n_results=n_results,
-            where=where,
-            include=["documents", "metadatas", "distances"],
-        )
-    except Exception:
-        # Filter matched nothing — fall back to unfiltered search
-        print(f"  [retrieve] filter matched nothing, falling back to unfiltered search")
-        results = retriever.collection.query(
-            query_texts=[state["query"]],
-            n_results=n_results,
-            include=["documents", "metadatas", "distances"],
-        )
-    chunks = [
-        {"text": doc, "metadata": meta, "score": round(1 - dist, 4)}
-        for doc, meta, dist in zip(
-            results["documents"][0],
-            results["metadatas"][0],
-            results["distances"][0],
-        )
-    ]
+    where = build_where(state)
+    chunks = retriever.retrieve(state["query"], n_results=n_results, where=where)
     context = "\n\n---\n\n".join(
         f"[{c['metadata']['doc_name']} / {c['metadata']['section']}]\n{c['text']}"
         for c in chunks
     )
-    print(f"  [retrieve] iteration={state['iteration']+1}  query='{state['query'][:60]}'  chunks={len(chunks)}")
+    print(
+        f"  [retrieve] iteration={state['iteration'] + 1}  "
+        f"query='{state['query'][:60]}'  chunks={len(chunks)}"
+    )
     return {"chunks": chunks, "context": context, "iteration": state["iteration"] + 1}
 
 
@@ -199,6 +100,7 @@ def _generate(state: AgentState) -> dict:
         }],
         max_tokens=1024,
         temperature=0.2,
+        label="generate",
     )
     print(f"  [generate] answer length={len(answer)}")
     return {"draft_answer": answer}
@@ -221,6 +123,7 @@ def _evaluate(state: AgentState) -> dict:
             ),
         }],
         max_tokens=256,
+        label="evaluate",
     )
     try:
         parsed = _json(result)
@@ -232,7 +135,10 @@ def _evaluate(state: AgentState) -> dict:
         missing = ""
         refined = ""
 
-    print(f"  [evaluate] complete={complete}" + (f"  missing='{missing[:60]}'" if not complete else ""))
+    print(
+        f"  [evaluate] complete={complete}"
+        + (f"  missing='{missing[:60]}'" if not complete else "")
+    )
 
     next_query = refined if (refined and not complete) else state["query"]
     final = state["draft_answer"] if complete else state["final_answer"]
@@ -250,16 +156,84 @@ def _should_continue(state: AgentState, max_iterations: int) -> str:
     return "continue"
 
 
-# ---------------------------------------------------------------------------
-# Public agent class
-# ---------------------------------------------------------------------------
-
 class RAGAgent:
-    def __init__(self, n_results: int = 5, max_iterations: int = 3):
+    """Reusable RAG engine plus a general Q&A graph."""
+
+    def __init__(
+        self,
+        n_results: int = 5,
+        max_iterations: int = 3,
+        min_score: float = CONFIDENCE_THRESHOLD,
+        use_reranker: bool = True,
+        use_bm25: bool = True,
+    ):
         self.n_results = n_results
         self.max_iterations = max_iterations
-        self._retriever = RAGRetriever()
+        self._retriever = RAGRetriever(
+            min_score=min_score,
+            use_reranker=use_reranker,
+            use_bm25=use_bm25,
+        )
         self._graph = self._build_graph()
+        from rag.utils.token_tracker import UsageTracker
+        self.tracker = UsageTracker()
+
+    def _initial_state(self, question: str) -> AgentState:
+        """Create the default graph/planning state for a question."""
+        return {
+            "question": question,
+            "query": question,
+            "topic_filter": "",
+            "series_filter": "",
+            "doc_filter": "",
+            "doc_filters": [],
+            "date_from": "",
+            "date_to": "",
+            "chunks": [],
+            "context": "",
+            "draft_answer": "",
+            "complete": False,
+            "missing": "",
+            "final_answer": "",
+            "iteration": 0,
+        }
+
+    def plan(self, question: str) -> dict:
+        """Return a manifest-aware retrieval plan for a question."""
+        from rag.utils.token_tracker import set_active_tracker
+        with set_active_tracker(self.tracker):
+            return plan_retrieval_scope(question, _deepseek)
+
+    def retrieve(
+        self,
+        query: str,
+        plan: dict | None = None,
+        n_results: int | None = None,
+    ) -> list[dict]:
+        """Retrieve chunks for a query, optionally scoped by a retrieval plan."""
+        where = build_where(plan) if plan else None
+        return self._retriever.retrieve(
+            query,
+            n_results=n_results or self.n_results,
+            where=where,
+        )
+
+    def generate(
+        self,
+        prompt: str,
+        max_tokens: int = 1024,
+        temperature: float = 0.2,
+        label: str = "generate",
+    ) -> str:
+        """Generate text from a fully formed prompt using the shared LLM client."""
+        from rag.utils.token_tracker import set_active_tracker
+        with set_active_tracker(self.tracker):
+            return _deepseek(
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=temperature,
+                label=label,
+            )
 
     def _build_graph(self):
         n = self.n_results
@@ -284,21 +258,18 @@ class RAGAgent:
         return builder.compile()
 
     def run(self, question: str) -> str:
-        """Run the full agent loop and return the final answer."""
+        """Run the full general Q&A loop and return the final answer."""
+        from rag.utils.token_tracker import set_active_tracker
+
         print(f"\nAgent question: {question}\n")
-        result = self._graph.invoke({
-            "question": question,
-            "query": question,
-            "topic_filter": "",
-            "series_filter": "",
-            "doc_filter": "",
-            "chunks": [],
-            "context": "",
-            "draft_answer": "",
-            "complete": False,
-            "missing": "",
-            "final_answer": "",
-            "iteration": 0,
-        })
-        # If loop exited on max_iterations without completing, use the last draft
-        return result["final_answer"] or result["draft_answer"]
+        self.tracker.reset()
+        with set_active_tracker(self.tracker):
+            result = self._graph.invoke(self._initial_state(question))
+        answer = result["final_answer"] or result["draft_answer"]
+        self.tracker.print_summary()
+        self.tracker.save_jsonl(USAGE_LOG_PATH, {"agent": "RAGAgent", "question": question})
+        return answer
+
+    def answer(self, question: str) -> str:
+        """Alias for run(), for callers that treat RAGAgent as a QA engine."""
+        return self.run(question)

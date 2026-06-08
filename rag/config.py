@@ -19,3 +19,11 @@ MANIFEST_PATH = CHROMA_PATH / "manifest.json"
 # DeepSeek model used for answer generation (OpenAI-compatible API)
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_MODEL = "deepseek-chat"
+
+# Token usage log — one JSON line appended per agent run
+USAGE_LOG_PATH = CHROMA_PATH / "usage_log.jsonl"
+
+# P2 retrieval quality settings
+CONFIDENCE_THRESHOLD = 0.45          # drop chunks with cosine score below this
+RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-12-v2"
+RERANK_CANDIDATES = 20               # recall this many candidates before reranking

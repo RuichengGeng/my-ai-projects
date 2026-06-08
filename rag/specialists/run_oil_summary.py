@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Run the RAG agent for a single question."""
+"""Generate a structured oil market summary from indexed documents."""
 
 import sys
 from pathlib import Path
@@ -9,19 +9,18 @@ from dotenv import load_dotenv
 load_dotenv()
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from rag.agent.service import RAGAgent
+from rag.specialists.oil_market import OilMarketSummaryAgent
 
 # ── Configure here ────────────────────────────────────────────────────────────
-QUESTION = "Summarize market update for Crude Oil Marketwire for last week?"
-N_RESULTS = 5      # chunks retrieved per iteration
-MAX_ITERATIONS = 3  # max retrieval-generate-evaluate loops
+QUESTION = "Summarize last week's APAC oil market update"
+N_RESULTS = 5   # chunks retrieved per sub-query (6 sub-queries run in total)
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 def main() -> None:
-    agent = RAGAgent(n_results=N_RESULTS, max_iterations=MAX_ITERATIONS)
+    agent = OilMarketSummaryAgent(n_results=N_RESULTS)
     answer = agent.run(QUESTION)
-    print("\nFinal Answer:")
+    print("\nOil Market Summary")
     print("=" * 60)
     print(answer)
 
