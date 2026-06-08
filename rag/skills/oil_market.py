@@ -19,7 +19,8 @@ work identically.
 
 import os
 
-from rag.agent.service import AgentState, _deepseek, _json, _plan
+from rag.agent.service import AgentState, _build_where, _deepseek, _json, _plan
+from rag.config import CONFIDENCE_THRESHOLD
 from rag.query.service import RAGRetriever
 
 # ---------------------------------------------------------------------------
@@ -89,50 +90,24 @@ Question / scope: {question}"""
 class OilMarketSummaryAgent:
     """Structured oil market summary using multi-category retrieval."""
 
-    def __init__(self, n_results: int = 5):
+    def __init__(
+        self,
+        n_results: int = 5,
+        min_score: float = CONFIDENCE_THRESHOLD,
+        use_reranker: bool = True,
+        use_bm25: bool = True,
+    ):
         self.n_results = n_results
-        self._retriever = RAGRetriever()
+        self._retriever = RAGRetriever(
+            min_score=min_score,
+            use_reranker=use_reranker,
+            use_bm25=use_bm25,
+        )
         from rag.utils.token_tracker import UsageTracker
         self.tracker = UsageTracker()
 
-    # ── ChromaDB filter helpers ──────────────────────────────────────────────
-
-    def _build_where(self, plan: dict) -> dict | None:
-        """Convert plan output into a ChromaDB where-filter."""
-        if plan.get("doc_filter"):
-            return {"doc_name": {"$eq": plan["doc_filter"]}}
-        if plan.get("doc_filters"):
-            df = plan["doc_filters"]
-            return {"doc_name": {"$eq": df[0]}} if len(df) == 1 else {"doc_name": {"$in": df}}
-        if plan.get("series_filter"):
-            return {"series_name": {"$eq": plan["series_filter"]}}
-        if plan.get("topic_filter"):
-            return {"topic": {"$eq": plan["topic_filter"]}}
-        return None
-
     def _query_category(self, subquery: str, where: dict | None) -> list[dict]:
-        try:
-            results = self._retriever.collection.query(
-                query_texts=[subquery],
-                n_results=self.n_results,
-                where=where,
-                include=["documents", "metadatas", "distances"],
-            )
-        except Exception:
-            print(f"    [warn] filter matched nothing, retrying unfiltered")
-            results = self._retriever.collection.query(
-                query_texts=[subquery],
-                n_results=self.n_results,
-                include=["documents", "metadatas", "distances"],
-            )
-        return [
-            {"text": doc, "metadata": meta, "score": round(1 - dist, 4)}
-            for doc, meta, dist in zip(
-                results["documents"][0],
-                results["metadatas"][0],
-                results["distances"][0],
-            )
-        ]
+        return self._retriever.retrieve(subquery, n_results=self.n_results, where=where)
 
     # ── Public entry point ───────────────────────────────────────────────────
 
@@ -163,7 +138,7 @@ class OilMarketSummaryAgent:
         }
         with set_active_tracker(self.tracker):
             plan = _plan(init_state)
-            where = self._build_where(plan)
+            where = _build_where(plan)
 
             # Step 2: multi-category retrieval — deduplicate by (doc, section),
             # keeping the highest-scoring copy of any repeated chunk
