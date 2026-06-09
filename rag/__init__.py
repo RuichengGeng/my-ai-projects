@@ -5,7 +5,7 @@ This package is designed to be used independently by any agent in this project.
 
 Quick start
 -----------
-    from rag import RAGAgent, RAGRetriever, OilMarketSummaryAgent
+    from rag import RAGAgent, RAGRetriever, MarkdownRAGRetriever, OilMarketSummaryAgent
 
     # General Q&A agent with topic/date-aware planning and self-evaluation loop
     agent = RAGAgent()
@@ -19,6 +19,9 @@ Quick start
     retriever = RAGRetriever()
     chunks = retriever.retrieve("roll yield futures", n_results=5)
     answer  = retriever.ask("What is roll yield?")
+
+    md_retriever = MarkdownRAGRetriever()
+    chunks = md_retriever.retrieve("Murban Dubai spread", n_results=5)
 
     # Index documents from pdf_parser output
     from rag import build_index, list_docs
@@ -36,6 +39,7 @@ For use outside this package:
 from rag.agent.service import RAGAgent
 from rag.eval.service import EvalService
 from rag.indexer.service import build_index, delete_doc, list_docs, reindex_doc
+from rag.query.md_service import MarkdownRAGRetriever
 from rag.query.service import RAGRetriever
 from rag.specialists.oil_market import OilMarketSummaryAgent
 
@@ -43,6 +47,7 @@ __all__ = [
     "RAGAgent",
     "OilMarketSummaryAgent",
     "RAGRetriever",
+    "MarkdownRAGRetriever",
     "EvalService",
     "build_index",
     "list_docs",

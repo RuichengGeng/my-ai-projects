@@ -3,6 +3,18 @@
 from __future__ import annotations
 
 
+def tokenize(text: str) -> list[str]:
+    """Tokenize text for lexical retrieval.
+
+    Keep commodity/product tokens such as ``380cst`` intact while stripping
+    markdown punctuation and table formatting that would otherwise attach to
+    words when using ``str.split``.
+    """
+    import re
+
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
 def _matches_where(metadata: dict, where: dict) -> bool:
     """Evaluate a ChromaDB-style where filter against a metadata dict."""
     if not where:
@@ -27,11 +39,11 @@ class BM25Index:
     def __init__(self, chunks: list[dict]):
         from rank_bm25 import BM25Okapi
         self._chunks = chunks
-        self._bm25 = BM25Okapi([c["text"].lower().split() for c in chunks])
+        self._bm25 = BM25Okapi([tokenize(c.get("search_text", c["text"])) for c in chunks])
 
     def search(self, query: str, top_n: int, where: dict | None = None) -> list[dict]:
         import numpy as np
-        scores = self._bm25.get_scores(query.lower().split())
+        scores = self._bm25.get_scores(tokenize(query))
         order = np.argsort(scores)[::-1]
         results: list[dict] = []
         for idx in order:

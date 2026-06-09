@@ -58,6 +58,8 @@ _MONTH = {"jan":1,"feb":2,"mar":3,"apr":4,"may":5,"jun":6,
 _DATE_PATTERNS = [
     # _DD_Mon_YYYY  e.g. _05_Jun_2026
     (re.compile(r'[_-](\d{1,2})[_-]([A-Za-z]{3})[_-](\d{4})$'), 'dmy'),
+    # _DD Mon YYYY  e.g. _05 Jun 2026
+    (re.compile(r'[_-](\d{1,2})\s+([A-Za-z]{3})\s+(\d{4})$'), 'dmy'),
     # _YYYY-MM-DD  e.g. _2026-06-05
     (re.compile(r'[_-](\d{4})-(\d{2})-(\d{2})$'), 'ymd_dash'),
     # _YYYYMMDD  e.g. _20260511  (8 digits)

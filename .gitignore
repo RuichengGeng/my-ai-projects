@@ -30,3 +30,6 @@ rag_store/
 pdf_parser/pdf_files/
 
 .claude/
+
+
+rag_output/

@@ -12,19 +12,33 @@ evaluate loop but is scoped to a single report section, so a weak first pass
 on (say) arbitrage can recover without affecting the other sections.
 """
 
+import json
+import re
+from datetime import date
+
 from rag.agent.service import RAGAgent
 from rag.config import CONFIDENCE_THRESHOLD
+from rag.config import MANIFEST_PATH
+from rag.indexer.service import _parse_series
 
 
 NO_RELEVANT_CONTENT = "NO_RELEVANT_CONTENT"
 MAX_SECTION_RETRIES = 2
+OIL_SOURCE_SERIES = (
+    "Crude Oil Marketwire",
+    "Asia-Pacific - Arab Gulf Marketscan",
+    "Asia-Pacific Weekly Oil Recap",
+)
 
 
 SECTIONS: list[dict[str, str]] = [
     {
         "key": "crude",
         "title": "Crude Oil",
-        "query": "crude oil benchmark price Brent WTI Dubai Oman ESPO Murban change direction",
+        "query": (
+            "crude daily market analysis commentary benchmark assessments "
+            "price changes Dubai Oman Murban Brent WTI ESPO"
+        ),
         "instructions": (
             "Benchmark crudes including Brent, WTI, Dubai, Oman, ESPO, Murban, "
             "price levels, changes, direction, drivers, and benchmark spreads."
@@ -33,7 +47,10 @@ SECTIONS: list[dict[str, str]] = [
     {
         "key": "heavy",
         "title": "Oil Products - Heavy (Fuel Oil, Bunker, VLSFO, HSFO)",
-        "query": "fuel oil HSFO VLSFO LSFO bunker 380cst 180cst heavy products price crack spread",
+        "query": (
+            "fuel oil daily market analysis bunker HSFO VLSFO 380cst 180cst "
+            "crack premiums discounts demand"
+        ),
         "instructions": (
             "Fuel oil and bunker markets, HSFO, VLSFO, LSFO, 380cst, 180cst, "
             "crack spreads, premiums or discounts, and demand trends."
@@ -42,7 +59,10 @@ SECTIONS: list[dict[str, str]] = [
     {
         "key": "middle",
         "title": "Oil Products - Middle Distillates (Diesel, Gasoil, Jet Fuel, Kerosene)",
-        "query": "diesel gasoil jet fuel kerosene middle distillates GO crack spread refinery margin",
+        "query": (
+            "gasoil jet kerosene daily market analysis middle distillates "
+            "diesel crack refinery margin demand"
+        ),
         "instructions": (
             "Diesel, gasoil, jet fuel, kerosene, middle distillate price moves, "
             "crack spreads, margins, and demand trends."
@@ -51,7 +71,10 @@ SECTIONS: list[dict[str, str]] = [
     {
         "key": "light",
         "title": "Oil Products - Light Ends (Naphtha, Gasoline, LPG)",
-        "query": "naphtha gasoline mogas unleaded LPG propane butane light ends crack spread",
+        "query": (
+            "naphtha gasoline LPG daily market analysis light ends crack "
+            "spreads premiums demand"
+        ),
         "instructions": (
             "Naphtha, gasoline, mogas, LPG, propane, butane, light-end price "
             "moves, crack spreads, and demand trends."
@@ -60,7 +83,10 @@ SECTIONS: list[dict[str, str]] = [
     {
         "key": "arb",
         "title": "Arbitrage & Spreads",
-        "query": "arbitrage arb spread East West EW Asia Europe Atlantic Basin premium discount pairs",
+        "query": (
+            "arbitrage spread East West EFS Asia Europe Atlantic Basin "
+            "flows premiums discounts freight"
+        ),
         "instructions": (
             "Open or closed arbitrage windows, East-West spreads, Asia-Europe "
             "or Atlantic Basin flows, premiums, discounts, and inter-product spreads."
@@ -69,7 +95,10 @@ SECTIONS: list[dict[str, str]] = [
     {
         "key": "fundamentals",
         "title": "Supply & Demand Fundamentals",
-        "query": "supply demand inventory stock draw build production consumption trade flows OPEC",
+        "query": (
+            "supply demand inventory stocks draw build production consumption "
+            "trade flows refinery runs OPEC"
+        ),
         "instructions": (
             "Supply, demand, inventories, stock builds or draws, production, "
             "consumption, trade flows, OPEC decisions, and refinery run-rates."
@@ -148,6 +177,85 @@ class OilMarketSummaryAgent:
             f"[{c['metadata']['doc_name']} / {c['metadata']['section']}]\n{c['text']}"
             for c in chunks
         )
+
+    @staticmethod
+    def _as_of_date(question: str) -> str:
+        match = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", question)
+        if match:
+            return match.group(1)
+        return date.today().isoformat()
+
+    @staticmethod
+    def _source_for_doc(doc: dict) -> str:
+        series_name = doc.get("series_name") or ""
+        if series_name in OIL_SOURCE_SERIES:
+            return series_name
+
+        doc_name = doc.get("doc_name", "")
+        parsed_series, _ = _parse_series(doc_name)
+        if parsed_series in OIL_SOURCE_SERIES:
+            return parsed_series
+
+        topic = doc.get("topic", "")
+        for source in OIL_SOURCE_SERIES:
+            normalized_source = re.sub(r"[\s_-]+", " ", source).strip()
+            if topic.startswith(normalized_source):
+                return source
+
+        return ""
+
+    @staticmethod
+    def _date_for_doc(doc: dict) -> str:
+        if doc.get("series_date"):
+            return doc["series_date"]
+        _, parsed_date = _parse_series(doc.get("doc_name", ""))
+        return parsed_date.isoformat() if parsed_date else ""
+
+    def _oil_source_plan(self, question: str, base_plan: dict) -> dict:
+        """Scope broad oil summaries to the latest issue from each oil source."""
+        if not MANIFEST_PATH.exists():
+            return base_plan
+
+        manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        as_of = self._as_of_date(question)
+        latest_by_source: dict[str, dict] = {}
+
+        for doc in manifest.get("docs", []):
+            source = self._source_for_doc(doc)
+            if not source:
+                continue
+
+            series_date = self._date_for_doc(doc)
+            if not series_date or series_date > as_of:
+                continue
+
+            current = latest_by_source.get(source)
+            if current is None or series_date > self._date_for_doc(current):
+                latest_by_source[source] = doc
+
+        if not latest_by_source:
+            return base_plan
+
+        doc_filters = [
+            latest_by_source[source]["doc_name"]
+            for source in OIL_SOURCE_SERIES
+            if source in latest_by_source
+        ]
+        print(
+            f"  [oil-scope] sources={len(doc_filters)}  as_of={as_of}  "
+            + ", ".join(doc_filters)
+        )
+
+        return {
+            **base_plan,
+            "topic_filter": "",
+            "series_filter": "",
+            "doc_filter": "",
+            "doc_filters": doc_filters,
+            "date_from": "",
+            "date_to": as_of,
+            "query": question,
+        }
 
     # ── Generation helpers ───────────────────────────────────────────────────
 
@@ -232,7 +340,7 @@ class OilMarketSummaryAgent:
         self.last_chunks_by_category = {}
         self.last_sections = {}
 
-        self.last_plan = self.rag.plan(question)
+        self.last_plan = self._oil_source_plan(question, self.rag.plan(question))
 
         for section in SECTIONS:
             generated = self._run_section(section, self.last_plan, question)
