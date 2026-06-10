@@ -106,7 +106,9 @@ def mock_provider():
 
 @pytest.fixture()
 def monitor(mock_provider) -> OptionMonitor:
-    return OptionMonitor(symbols=["QQQ"])
+    # Pass valuation_date explicitly so DTE calculations are deterministic
+    # regardless of the container's system clock.
+    return OptionMonitor(symbols=["QQQ"], valuation_date=_TODAY)
 
 
 @pytest.fixture()
@@ -150,39 +152,47 @@ class TestRunOutputShape:
         for key, val in result.items():
             assert isinstance(val, pd.DataFrame), f"'{key}' is not a DataFrame"
 
+    def test_all_dataframes_have_valuation_date_column(self, result):
+        for key, df in result.items():
+            assert "valuation_date" in df.columns, f"'{key}' missing valuation_date"
+
     def test_spot_columns(self, result):
-        expected = {"symbol", "spot", "change_pct", "rv_5d", "rv_20d", "rv_60d"}
+        expected = {"symbol", "spot", "change_pct", "rv_5d", "rv_20d", "rv_60d",
+                    "valuation_date"}
         assert expected.issubset(result["spot"].columns)
 
     def test_iv_term_structure_columns(self, result):
         expected = {"symbol", "expiry", "dte", "dte_bucket",
-                    "atm_call_iv", "atm_put_iv", "atm_iv"}
+                    "atm_call_iv", "atm_put_iv", "atm_iv", "valuation_date"}
         assert expected.issubset(result["iv_term_structure"].columns)
 
     def test_iv_skew_columns(self, result):
         expected = {"symbol", "expiry", "dte", "dte_bucket",
-                    "otm_put_iv", "otm_call_iv", "skew"}
+                    "otm_put_iv", "otm_call_iv", "skew", "valuation_date"}
         assert expected.issubset(result["iv_skew"].columns)
 
     def test_pc_overall_columns(self, result):
         expected = {"symbol", "total_call_oi", "total_put_oi", "pc_oi_ratio",
-                    "total_call_vol", "total_put_vol", "pc_vol_ratio"}
+                    "total_call_vol", "total_put_vol", "pc_vol_ratio",
+                    "valuation_date"}
         assert expected.issubset(result["pc_overall"].columns)
 
     def test_pc_by_expiry_columns(self, result):
         expected = {"symbol", "dte_bucket", "call_oi", "put_oi",
-                    "pc_oi_ratio", "call_vol", "put_vol", "pc_vol_ratio"}
+                    "pc_oi_ratio", "call_vol", "put_vol", "pc_vol_ratio",
+                    "valuation_date"}
         assert expected.issubset(result["pc_by_expiry"].columns)
 
     def test_pc_by_moneyness_columns(self, result):
         expected = {"symbol", "moneyness_bucket", "call_oi", "put_oi",
-                    "pc_oi_ratio", "call_vol", "put_vol", "pc_vol_ratio"}
+                    "pc_oi_ratio", "call_vol", "put_vol", "pc_vol_ratio",
+                    "valuation_date"}
         assert expected.issubset(result["pc_by_moneyness"].columns)
 
     def test_positioning_columns(self, result):
         expected = {"symbol", "spot", "max_pain", "max_pain_dist_pct",
                     "call_wall", "call_wall_dist_pct",
-                    "put_wall", "put_wall_dist_pct"}
+                    "put_wall", "put_wall_dist_pct", "valuation_date"}
         assert expected.issubset(result["positioning"].columns)
 
     def test_one_row_per_symbol_in_spot(self, result):
@@ -537,3 +547,82 @@ class TestEdgeCases:
         result = monitor.run(symbols=["QQQ"])
         assert len(result["spot"]) == 1
         assert result["spot"]["symbol"].iloc[0] == "QQQ"
+
+
+# ── Valuation date ────────────────────────────────────────────────────────────
+
+class TestValuationDate:
+    FIXED_DATE = date(2025, 6, 9)
+    FIXED_DATE_STR = "2025-06-09"
+
+    def _expiries_for(self, vdate: date):
+        """Build expiry strings relative to a given valuation date."""
+        near = (vdate + timedelta(days=15)).strftime("%Y-%m-%d")
+        mid  = (vdate + timedelta(days=45)).strftime("%Y-%m-%d")
+        return near, mid
+
+    def test_valuation_date_stamped_on_all_dataframes(self, mock_provider):
+        vdate = self.FIXED_DATE
+        near, mid = self._expiries_for(vdate)
+        mock_provider.get_option_expirations.return_value = (near, mid)
+        monitor = OptionMonitor(symbols=["QQQ"], valuation_date=vdate)
+        result = monitor.run()
+        for key, df in result.items():
+            if not df.empty:
+                assert df["valuation_date"].iloc[0] == self.FIXED_DATE_STR, (
+                    f"'{key}' has wrong valuation_date"
+                )
+
+    def test_string_valuation_date_accepted(self, mock_provider):
+        near, mid = self._expiries_for(self.FIXED_DATE)
+        mock_provider.get_option_expirations.return_value = (near, mid)
+        monitor = OptionMonitor(symbols=["QQQ"], valuation_date=self.FIXED_DATE_STR)
+        result = monitor.run()
+        assert result["spot"]["valuation_date"].iloc[0] == self.FIXED_DATE_STR
+
+    def test_run_time_valuation_date_overrides_init(self, mock_provider):
+        # Monitor created with one date, run() called with another
+        init_date = date(2025, 1, 1)
+        run_date  = self.FIXED_DATE
+        near, mid = self._expiries_for(run_date)
+        mock_provider.get_option_expirations.return_value = (near, mid)
+        monitor = OptionMonitor(symbols=["QQQ"], valuation_date=init_date)
+        result = monitor.run(valuation_date=run_date)
+        assert result["spot"]["valuation_date"].iloc[0] == self.FIXED_DATE_STR
+
+    def test_past_expiries_skipped_relative_to_valuation_date(self, mock_provider):
+        # Expiry one day before valuation date → DTE = -1 → skipped
+        vdate = self.FIXED_DATE
+        past_expiry = (vdate - timedelta(days=1)).strftime("%Y-%m-%d")
+        mock_provider.get_option_expirations.return_value = (past_expiry,)
+        monitor = OptionMonitor(symbols=["QQQ"], valuation_date=vdate)
+        result = monitor.run()
+        assert result["pc_overall"].empty
+
+    def test_future_expiries_accepted_relative_to_valuation_date(self, mock_provider):
+        # Expiry 30 days after valuation date → DTE = 30 → kept
+        vdate = self.FIXED_DATE
+        future_expiry = (vdate + timedelta(days=30)).strftime("%Y-%m-%d")
+        mock_provider.get_option_expirations.return_value = (future_expiry,)
+        monitor = OptionMonitor(symbols=["QQQ"], valuation_date=vdate)
+        result = monitor.run()
+        assert not result["pc_overall"].empty
+
+    def test_dte_computed_relative_to_valuation_date(self, mock_provider):
+        vdate = self.FIXED_DATE
+        expiry = (vdate + timedelta(days=20)).strftime("%Y-%m-%d")
+        mock_provider.get_option_expirations.return_value = (expiry,)
+        monitor = OptionMonitor(symbols=["QQQ"], valuation_date=vdate)
+        result = monitor.run()
+        assert result["iv_term_structure"]["dte"].iloc[0] == 20
+
+    def test_default_valuation_date_is_today(self, mock_provider):
+        monitor = OptionMonitor(symbols=["QQQ"])
+        assert monitor.valuation_date == date.today()
+
+    def test_empty_dataframes_also_carry_valuation_date_column(self, mock_provider):
+        mock_provider.get_option_expirations.return_value = ()
+        monitor = OptionMonitor(symbols=["QQQ"], valuation_date=self.FIXED_DATE)
+        result = monitor.run()
+        # pc_overall is empty (no chain data) but must still have the column
+        assert "valuation_date" in result["pc_overall"].columns

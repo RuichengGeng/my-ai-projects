@@ -12,11 +12,25 @@ Returns seven DataFrames from run():
 """
 
 from datetime import date, datetime
+from typing import Union
 
 import numpy as np
 import pandas as pd
 
 from .yahoo_finance import YahooFinanceProvider
+
+
+def _parse_date(d: Union[date, str, None]) -> date:
+    """Coerce a date argument to a ``datetime.date``.
+
+    Accepts a ``datetime.date`` object, an ISO-8601 string ("yyyy-mm-dd"),
+    or ``None`` (returns today).
+    """
+    if d is None:
+        return date.today()
+    if isinstance(d, str):
+        return datetime.strptime(d, "%Y-%m-%d").date()
+    return d
 
 # ── Universe ──────────────────────────────────────────────────────────────────
 
@@ -82,21 +96,41 @@ class OptionMonitor:
     symbols:
         Override the default universe.  Pass a short list for faster runs
         during development.
+    valuation_date:
+        Reference date used to compute DTE for every option contract.
+        Accepts a ``datetime.date`` object or an ISO string ("yyyy-mm-dd").
+        Defaults to today when omitted.  Pass this explicitly whenever
+        ``date.today()`` may not match the date of the data you are
+        fetching (e.g. running in a container with a shifted system clock,
+        or analysing a historical snapshot).
     """
 
-    def __init__(self, symbols: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        symbols: list[str] | None = None,
+        valuation_date: date | str | None = None,
+    ) -> None:
         self.symbols = symbols or DEFAULT_UNIVERSE
+        self.valuation_date = _parse_date(valuation_date)
         self._provider = YahooFinanceProvider()
 
     # ── Public ────────────────────────────────────────────────────────────────
 
-    def run(self, symbols: list[str] | None = None) -> dict[str, pd.DataFrame]:
+    def run(
+        self,
+        symbols: list[str] | None = None,
+        valuation_date: date | str | None = None,
+    ) -> dict[str, pd.DataFrame]:
         """Fetch data and compute all metrics.
 
         Parameters
         ----------
         symbols:
             Run-time override; falls back to ``self.symbols``.
+        valuation_date:
+            Run-time override for the reference date used to compute DTE.
+            Falls back to ``self.valuation_date`` (set at construction time),
+            which itself defaults to today.
 
         Returns
         -------
@@ -104,8 +138,13 @@ class OptionMonitor:
             ``spot``, ``iv_term_structure``, ``iv_skew``,
             ``pc_overall``, ``pc_by_expiry``, ``pc_by_moneyness``,
             ``positioning``
+
+            Every DataFrame contains a ``valuation_date`` column (ISO string)
+            so each result is self-describing.
         """
         targets = symbols or self.symbols
+        vdate = _parse_date(valuation_date) if valuation_date is not None else self.valuation_date
+        vdate_str = vdate.isoformat()
 
         spot_rows, iv_ts_rows, iv_skew_rows = [], [], []
         pc_overall_rows, pc_expiry_rows, pc_moneyness_rows = [], [], []
@@ -116,7 +155,7 @@ class OptionMonitor:
                 spot, spot_row = self._spot_snapshot(symbol)
                 spot_rows.append(spot_row)
 
-                chain = self._build_chain(symbol, spot)
+                chain = self._build_chain(symbol, spot, vdate)
                 if chain.empty:
                     continue
 
@@ -131,7 +170,7 @@ class OptionMonitor:
                 # One bad symbol must not abort the full run
                 continue
 
-        return {
+        results = {
             "spot": pd.DataFrame(spot_rows),
             "iv_term_structure": pd.DataFrame(iv_ts_rows),
             "iv_skew": pd.DataFrame(iv_skew_rows),
@@ -140,6 +179,11 @@ class OptionMonitor:
             "pc_by_moneyness": pd.DataFrame(pc_moneyness_rows),
             "positioning": pd.DataFrame(positioning_rows),
         }
+
+        for df in results.values():
+            df["valuation_date"] = vdate_str
+
+        return results
 
     # ── Spot snapshot ─────────────────────────────────────────────────────────
 
@@ -165,14 +209,13 @@ class OptionMonitor:
 
     # ── Chain builder ─────────────────────────────────────────────────────────
 
-    def _build_chain(self, symbol: str, spot: float) -> pd.DataFrame:
+    def _build_chain(self, symbol: str, spot: float, valuation_date: date) -> pd.DataFrame:
         expirations = self._provider.get_option_expirations(symbol)
-        today = date.today()
         frames = []
 
         for expiry in expirations:
             exp_date = datetime.strptime(expiry, "%Y-%m-%d").date()
-            dte = (exp_date - today).days
+            dte = (exp_date - valuation_date).days
             if dte < 0:
                 continue
             try:
