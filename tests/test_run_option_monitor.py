@@ -165,7 +165,7 @@ class TestSymbolSelection:
             return _make_monitor_mock()
 
         with patch("run_option_monitor.OptionMonitor", side_effect=fake_init):
-            runner.invoke(app, ["-s", "qqq", "-s", "spy", "-d", VDATE])
+            runner.invoke(app, ["-s", "qqq,spy", "-d", VDATE])
 
         assert "QQQ" in captured_symbols
         assert "SPY" in captured_symbols

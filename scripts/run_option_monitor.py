@@ -102,8 +102,8 @@ def _save_csvs(results: dict[str, pd.DataFrame], output_dir: Path) -> None:
 
 @app.command()
 def main(
-    symbols: Optional[list[str]] = typer.Option(
-        None, "--symbols", "-s", help="Space-separated list of symbols to analyse."
+    symbols: Optional[str] = typer.Option(
+        None, "--symbols", "-s", help="Comma-separated symbols to analyse, e.g. QQQ,SPY,AAPL."
     ),
     valuation_date: Optional[str] = typer.Option(
         None, "--valuation-date", "-d",
@@ -125,7 +125,7 @@ def main(
         raise typer.Exit(code=1)
 
     if symbols:
-        target_symbols = [s.upper() for s in symbols]
+        target_symbols = [s.strip().upper() for s in symbols.split(",") if s.strip()]
     elif etfs_only:
         target_symbols = ETF_UNIVERSE
     elif equities_only:
