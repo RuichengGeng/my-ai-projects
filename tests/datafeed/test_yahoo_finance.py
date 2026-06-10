@@ -12,6 +12,9 @@ import pytest
 
 from datafeed.yahoo_finance import YahooFinanceProvider
 from datafeed.yahoo_finance_base import (
+    INTERVAL_MAX_HISTORY,
+    SUPPORTED_ASSET_CLASSES,
+    VALID_INTERVALS,
     YahooFinanceError,
     validate_interval,
     validate_period,
@@ -148,9 +151,10 @@ class TestGetHistory:
         mock = _mock_ticker()
         with patch("datafeed.yahoo_finance.yf.Ticker", return_value=mock):
             provider.get_history("AAPL", period="6mo", interval="1wk")
-        mock.history.assert_called_once_with(
-            interval="1wk", auto_adjust=True, period="6mo"
-        )
+        kw = mock.history.call_args.kwargs
+        assert kw["interval"] == "1wk"
+        assert kw["auto_adjust"] is True
+        assert kw["period"] == "6mo"
 
     def test_start_end_override_period(self, provider):
         mock = _mock_ticker()
@@ -473,3 +477,158 @@ class TestGetCalendar:
         with patch("datafeed.yahoo_finance.yf.Ticker", return_value=_mock_ticker()):
             cal = provider.get_calendar("AAPL")
         assert "Earnings Date" in cal
+
+
+# ── Coverage ──────────────────────────────────────────────────────────────────
+
+class TestCoverage:
+    EXPECTED_ASSET_CLASSES = {
+        "equities_us", "equities_international", "etfs", "indices",
+        "crypto", "forex", "futures", "mutual_funds", "bonds_rates",
+    }
+
+    def test_all_expected_asset_classes_present(self):
+        assert self.EXPECTED_ASSET_CLASSES.issubset(SUPPORTED_ASSET_CLASSES.keys())
+
+    def test_each_asset_class_has_required_keys(self):
+        required = {"description", "symbol_format", "examples", "history"}
+        for name, info in SUPPORTED_ASSET_CLASSES.items():
+            missing = required - info.keys()
+            assert not missing, f"'{name}' is missing keys: {missing}"
+
+    def test_examples_are_non_empty_lists(self):
+        for name, info in SUPPORTED_ASSET_CLASSES.items():
+            assert isinstance(info["examples"], list) and info["examples"], (
+                f"'{name}' must have at least one example symbol"
+            )
+
+    def test_financials_and_options_flags_are_booleans(self):
+        for name, info in SUPPORTED_ASSET_CLASSES.items():
+            assert isinstance(info.get("financials"), bool), f"'{name}'.financials not bool"
+            assert isinstance(info.get("options"), bool), f"'{name}'.options not bool"
+
+    def test_equities_us_supports_financials_and_options(self):
+        eq = SUPPORTED_ASSET_CLASSES["equities_us"]
+        assert eq["financials"] is True
+        assert eq["options"] is True
+
+    def test_crypto_has_no_financials_or_options(self):
+        cr = SUPPORTED_ASSET_CLASSES["crypto"]
+        assert cr["financials"] is False
+        assert cr["options"] is False
+
+    def test_forex_has_no_financials_or_options(self):
+        fx = SUPPORTED_ASSET_CLASSES["forex"]
+        assert fx["financials"] is False
+        assert fx["options"] is False
+
+    def test_all_valid_intervals_have_max_history_entry(self):
+        for interval in VALID_INTERVALS:
+            assert interval in INTERVAL_MAX_HISTORY, (
+                f"Interval '{interval}' missing from INTERVAL_MAX_HISTORY"
+            )
+
+    def test_one_minute_limited_to_7_days(self):
+        assert "7" in INTERVAL_MAX_HISTORY["1m"]
+
+    def test_sub_hour_intervals_limited_to_60_days(self):
+        for iv in ["2m", "5m", "15m", "30m", "90m"]:
+            assert "60" in INTERVAL_MAX_HISTORY[iv], (
+                f"Interval '{iv}' should show 60-day limit"
+            )
+
+    def test_hourly_intervals_limited_to_730_days(self):
+        for iv in ["60m", "1h"]:
+            assert "730" in INTERVAL_MAX_HISTORY[iv], (
+                f"Interval '{iv}' should show 730-day limit"
+            )
+
+    def test_daily_and_coarser_have_full_history(self):
+        for iv in ["1d", "5d", "1wk", "1mo", "3mo"]:
+            assert "full" in INTERVAL_MAX_HISTORY[iv].lower(), (
+                f"Interval '{iv}' should indicate full history"
+            )
+
+    def test_get_coverage_has_three_sections(self, provider):
+        cov = provider.get_coverage()
+        assert "asset_classes" in cov
+        assert "interval_max_history" in cov
+        assert "price_adjustment" in cov
+
+    def test_get_coverage_asset_classes_matches_constant(self, provider):
+        assert provider.get_coverage()["asset_classes"] is SUPPORTED_ASSET_CLASSES
+
+    def test_get_coverage_interval_history_matches_constant(self, provider):
+        assert provider.get_coverage()["interval_max_history"] is INTERVAL_MAX_HISTORY
+
+    def test_get_coverage_is_callable_as_static(self):
+        # Should work without instantiating the class
+        cov = YahooFinanceProvider.get_coverage()
+        assert isinstance(cov, dict)
+
+
+# ── Price adjustment ──────────────────────────────────────────────────────────
+
+class TestPriceAdjustment:
+    """Verify that price-adjustment flags are forwarded correctly to yfinance."""
+
+    def test_auto_adjust_true_by_default(self, provider):
+        mock = _mock_ticker()
+        with patch("datafeed.yahoo_finance.yf.Ticker", return_value=mock):
+            provider.get_history("AAPL")
+        assert mock.history.call_args.kwargs["auto_adjust"] is True
+
+    def test_auto_adjust_false_forwarded(self, provider):
+        mock = _mock_ticker()
+        with patch("datafeed.yahoo_finance.yf.Ticker", return_value=mock):
+            provider.get_history("AAPL", auto_adjust=False)
+        assert mock.history.call_args.kwargs["auto_adjust"] is False
+
+    def test_back_adjust_false_by_default(self, provider):
+        mock = _mock_ticker()
+        with patch("datafeed.yahoo_finance.yf.Ticker", return_value=mock):
+            provider.get_history("AAPL")
+        assert mock.history.call_args.kwargs["back_adjust"] is False
+
+    def test_back_adjust_true_forwarded(self, provider):
+        mock = _mock_ticker()
+        with patch("datafeed.yahoo_finance.yf.Ticker", return_value=mock):
+            provider.get_history("AAPL", back_adjust=True)
+        assert mock.history.call_args.kwargs["back_adjust"] is True
+
+    def test_raw_prices_returned_when_auto_adjust_false(self, provider):
+        raw_df = _ohlcv_df()
+        mock = _mock_ticker(history_df=raw_df)
+        with patch("datafeed.yahoo_finance.yf.Ticker", return_value=mock):
+            df = provider.get_history("AAPL", auto_adjust=False)
+        assert not df.empty
+
+    def test_both_flags_forwarded_independently(self, provider):
+        mock = _mock_ticker()
+        with patch("datafeed.yahoo_finance.yf.Ticker", return_value=mock):
+            provider.get_history("AAPL", auto_adjust=False, back_adjust=True)
+        kw = mock.history.call_args.kwargs
+        assert kw["auto_adjust"] is False
+        assert kw["back_adjust"] is True
+
+    def test_coverage_documents_three_adjustment_modes(self, provider):
+        adj = provider.get_coverage()["price_adjustment"]
+        assert "auto_adjust_true" in adj
+        assert "auto_adjust_false" in adj
+        assert "back_adjust_true" in adj
+
+    def test_auto_adjust_true_description_mentions_dividends(self, provider):
+        desc = provider.get_coverage()["price_adjustment"]["auto_adjust_true"].lower()
+        assert "dividend" in desc
+
+    def test_auto_adjust_true_description_mentions_splits(self, provider):
+        desc = provider.get_coverage()["price_adjustment"]["auto_adjust_true"].lower()
+        assert "split" in desc
+
+    def test_auto_adjust_false_description_mentions_raw_or_unadjusted(self, provider):
+        desc = provider.get_coverage()["price_adjustment"]["auto_adjust_false"].lower()
+        assert "raw" in desc or "unadjusted" in desc
+
+    def test_back_adjust_true_description_mentions_back_adjust(self, provider):
+        desc = provider.get_coverage()["price_adjustment"]["back_adjust_true"].lower()
+        assert "back" in desc or "anchor" in desc or "proportion" in desc
