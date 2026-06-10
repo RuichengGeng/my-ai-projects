@@ -152,7 +152,7 @@ class OptionMonitor:
 
         for symbol in targets:
             try:
-                spot, spot_row = self._spot_snapshot(symbol)
+                spot, spot_row = self._spot_snapshot(symbol, vdate)
                 spot_rows.append(spot_row)
 
                 chain = self._build_chain(symbol, spot, vdate)
@@ -187,8 +187,10 @@ class OptionMonitor:
 
     # ── Spot snapshot ─────────────────────────────────────────────────────────
 
-    def _spot_snapshot(self, symbol: str) -> tuple[float, dict]:
-        hist = self._provider.get_history(symbol, period="3mo", interval="1d")
+    def _spot_snapshot(self, symbol: str, valuation_date: date) -> tuple[float, dict]:
+        hist = self._provider.get_history(
+            symbol, period="3mo", interval="1d", end=valuation_date.isoformat()
+        )
         close = hist["Close"]
         log_ret = np.log(close / close.shift(1)).dropna()
         spot = float(close.iloc[-1])

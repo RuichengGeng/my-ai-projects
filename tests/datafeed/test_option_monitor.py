@@ -626,3 +626,14 @@ class TestValuationDate:
         result = monitor.run()
         # pc_overall is empty (no chain data) but must still have the column
         assert "valuation_date" in result["pc_overall"].columns
+
+    def test_spot_history_fetched_up_to_valuation_date(self, mock_provider):
+        # _spot_snapshot must pass end=valuation_date to get_history so that
+        # spot price and realized vol reflect the same date as DTE calculation.
+        vdate = self.FIXED_DATE
+        near, mid = self._expiries_for(vdate)
+        mock_provider.get_option_expirations.return_value = (near, mid)
+        monitor = OptionMonitor(symbols=["QQQ"], valuation_date=vdate)
+        monitor.run()
+        call_kwargs = mock_provider.get_history.call_args.kwargs
+        assert call_kwargs.get("end") == self.FIXED_DATE_STR
