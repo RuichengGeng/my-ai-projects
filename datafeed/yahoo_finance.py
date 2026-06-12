@@ -110,8 +110,9 @@ class YahooFinanceProvider:
             ValueError: On invalid period or interval.
             YahooFinanceError: When Yahoo Finance returns no data.
         """
-        validate_period(period)
         validate_interval(interval)
+        if not (start or end):
+            validate_period(period)
 
         ticker = yf.Ticker(symbol)
         kwargs: dict = {
