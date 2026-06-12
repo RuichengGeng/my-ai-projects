@@ -22,7 +22,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from datafeed.option_monitor import (
+from option_monitor.monitor import (
     DEFAULT_UNIVERSE,
     EQUITY_UNIVERSE,
     ETF_UNIVERSE,
@@ -96,7 +96,7 @@ def _puts_df() -> pd.DataFrame:
 @pytest.fixture()
 def mock_provider():
     """Patch YahooFinanceProvider inside option_monitor and yield mock instance."""
-    with patch("datafeed.option_monitor.YahooFinanceProvider") as MockClass:
+    with patch("option_monitor.monitor.YahooFinanceProvider") as MockClass:
         inst = MockClass.return_value
         inst.get_history.return_value = _hist_df()
         inst.get_option_expirations.return_value = (EXPIRY_NEAR, EXPIRY_MID)
@@ -143,6 +143,7 @@ class TestRunOutputShape:
     EXPECTED_KEYS = {
         "spot", "iv_term_structure", "iv_skew",
         "pc_overall", "pc_by_expiry", "pc_by_moneyness", "positioning",
+        "derived", "data_quality",
     }
 
     def test_returns_all_dataframe_keys(self, result):
@@ -157,9 +158,16 @@ class TestRunOutputShape:
             assert "valuation_date" in df.columns, f"'{key}' missing valuation_date"
 
     def test_spot_columns(self, result):
-        expected = {"symbol", "spot", "change_pct", "rv_5d", "rv_20d", "rv_60d",
-                    "valuation_date"}
+        expected = {"symbol", "spot", "change_pct", "rel_volume",
+                    "rv_5d", "rv_20d", "rv_60d", "valuation_date"}
         assert expected.issubset(result["spot"].columns)
+
+    def test_derived_columns(self, result):
+        expected = {"symbol", "spot", "change_pct", "rel_volume", "rv_20d",
+                    "atm_iv_30d", "atm_iv_90d", "term_slope", "skew_30d",
+                    "iv_rv_spread", "pc_vol_ratio", "sentiment",
+                    "valuation_date"}
+        assert expected.issubset(result["derived"].columns)
 
     def test_iv_term_structure_columns(self, result):
         expected = {"symbol", "expiry", "dte", "dte_bucket",
@@ -418,17 +426,21 @@ class TestIVTermStructure:
 # ── IV skew ───────────────────────────────────────────────────────────────────
 
 class TestIVSkew:
+    # IV is linearly interpolated across strikes:
+    #   OTM put target = 480 * 0.95 = 456, between 440 (0.32) and 460 (0.26)
+    #       → 0.32 + (456-440)/(460-440) * (0.26-0.32) = 0.272
+    #   OTM call target = 480 * 1.05 = 504, between 500 (0.22) and 520 (0.25)
+    #       → 0.22 + (504-500)/(520-500) * (0.25-0.22) = 0.226
+    #   skew = 0.272 - 0.226 = 0.046
+    EXPECTED_PUT_IV = 0.272
+    EXPECTED_CALL_IV = 0.226
+
     def test_skew_is_positive(self, result):
-        # OTM put target = 480 * 0.95 = 456 → nearest strike = 460, put_iv[2] = 0.26
-        # OTM call target = 480 * 1.05 = 504 → nearest strike = 500, call_iv[4] = 0.22
-        # skew = 0.26 - 0.22 = 0.04
         for skew in result["iv_skew"]["skew"]:
             assert skew > 0, "Positive skew expected (puts more expensive)"
 
     def test_skew_value(self, result):
-        expected_put_iv  = PUT_IV[2]   # strike 460, nearest to 456
-        expected_call_iv = CALL_IV[4]  # strike 500, nearest to 504
-        expected_skew = round(expected_put_iv - expected_call_iv, 4)
+        expected_skew = round(self.EXPECTED_PUT_IV - self.EXPECTED_CALL_IV, 4)
         for skew in result["iv_skew"]["skew"]:
             assert skew == pytest.approx(expected_skew, abs=1e-4)
 
@@ -627,13 +639,63 @@ class TestValuationDate:
         # pc_overall is empty (no chain data) but must still have the column
         assert "valuation_date" in result["pc_overall"].columns
 
-    def test_spot_history_fetched_up_to_valuation_date(self, mock_provider):
-        # _spot_snapshot must pass end=valuation_date to get_history so that
-        # spot price and realized vol reflect the same date as DTE calculation.
+    def test_spot_history_includes_valuation_date_close(self, mock_provider):
+        # yfinance treats ``end`` as exclusive, so _spot_snapshot must pass
+        # valuation_date + 1 day for the close ON the valuation date to be
+        # included.
         vdate = self.FIXED_DATE
         near, mid = self._expiries_for(vdate)
         mock_provider.get_option_expirations.return_value = (near, mid)
         monitor = OptionMonitor(symbols=["QQQ"], valuation_date=vdate)
         monitor.run()
         call_kwargs = mock_provider.get_history.call_args.kwargs
-        assert call_kwargs.get("end") == self.FIXED_DATE_STR
+        assert call_kwargs.get("end") == (vdate + timedelta(days=1)).isoformat()
+
+
+# ── Relative volume & derived metrics ─────────────────────────────────────────
+
+class TestRelativeVolume:
+    def test_constant_volume_gives_rel_volume_of_one(self, result):
+        # Fixture volume is constant → last day / 20-day average = 1.0
+        assert result["spot"]["rel_volume"].iloc[0] == pytest.approx(1.0)
+
+
+class TestDerived:
+    def test_one_row_per_symbol(self, result):
+        assert len(result["derived"]) == 1
+
+    def test_atm_iv_30d_interpolated(self, result):
+        # ATM IV is 0.20 at both expiries (DTE 15 and 45) → 30d value = 0.20
+        assert result["derived"]["atm_iv_30d"].iloc[0] == pytest.approx(0.20, abs=1e-4)
+
+    def test_atm_iv_90d_clamped_to_far_expiry(self, result):
+        # 90d is beyond the longest expiry (45d) → clamped to its IV (0.20)
+        assert result["derived"]["atm_iv_90d"].iloc[0] == pytest.approx(0.20, abs=1e-4)
+
+    def test_term_slope_flat_curve_is_one(self, result):
+        assert result["derived"]["term_slope"].iloc[0] == pytest.approx(1.0, abs=1e-4)
+
+    def test_skew_30d_interpolated(self, result):
+        # Skew is 0.046 at both expiries → 30d value = 0.046
+        assert result["derived"]["skew_30d"].iloc[0] == pytest.approx(0.046, abs=1e-3)
+
+    def test_iv_rv_spread_is_iv_minus_rv20(self, result):
+        row = result["derived"].iloc[0]
+        expected = round(row["atm_iv_30d"] * 100 - row["rv_20d"], 2)
+        assert row["iv_rv_spread"] == pytest.approx(expected, abs=1e-2)
+
+    def test_pc_vol_ratio_matches_overall(self, result):
+        assert result["derived"]["pc_vol_ratio"].iloc[0] == pytest.approx(
+            result["pc_overall"]["pc_vol_ratio"].iloc[0], rel=1e-4
+        )
+
+    def test_sentiment_none_with_fewer_than_three_symbols(self, result):
+        # Single-symbol run → no cross-section → sentiment is None
+        assert result["derived"]["sentiment"].iloc[0] is None
+
+    def test_sentiment_present_with_three_symbols(self, mock_provider):
+        monitor = OptionMonitor(symbols=["SPY", "QQQ", "IWM"], valuation_date=_TODAY)
+        result = monitor.run()
+        sentiments = result["derived"]["sentiment"]
+        assert len(sentiments) == 3
+        assert sentiments.notna().all()

@@ -40,11 +40,14 @@ dependencies = [
     "sentence-transformers>=3.0.0",
     "anthropic>=0.40.0",
     "rank-bm25>=0.2.2",
+    # --- option monitor dashboard ---
+    "streamlit>=1.40.0",
+    "plotly>=5.24.0",
 ]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["finance_ai*", "my_playground*", "rag*", "pdf_parser*", "utils*"]
+include = ["finance_ai*", "my_playground*", "rag*", "pdf_parser*", "utils*", "option_monitor*", "datafeed*"]
 exclude = ["kronos*", "tradingagents*"]
 
 [build-system]

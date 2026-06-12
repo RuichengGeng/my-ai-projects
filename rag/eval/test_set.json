@@ -122,3 +122,8 @@
     }
   ]
 }
+
+
+https://www.alphavantage.co/query?function=BRENT&interval=daily&apikey=EH264AUT86NKGHA4
+
+https://mcp.alphavantage.co/mcp?apikey= EH264AUT86NKGHA4
