@@ -284,7 +284,7 @@ class OptionMonitor:
         close = hist["Close"]
         log_ret = np.log(close / close.shift(1)).dropna()
         spot = float(close.iloc[-1])
-        change_pct = float((close.iloc[-1] / close.iloc[-2] - 1) * 100)
+        change_pct = float((close.iloc[-1] / close.iloc[-2] - 1) * 100) if len(close) >= 2 else None
 
         # Relative volume: last day vs trailing average (excluding last day)
         rel_volume = None
@@ -313,7 +313,7 @@ class OptionMonitor:
             "spot": round(spot, 4),
             "price_date": price_date.isoformat(),
             "price_is_stale": price_is_stale,
-            "change_pct": round(change_pct, 2),
+            "change_pct": round(change_pct, 2) if change_pct is not None else None,
             "rel_volume": rel_volume,
         }
         for w in HV_WINDOWS:
@@ -344,7 +344,9 @@ class OptionMonitor:
         for expiry in expirations:
             exp_date = datetime.strptime(expiry, "%Y-%m-%d").date()
             dte = (exp_date - valuation_date).days
-            if dte < 0:
+            if dte <= 0:
+                # Skip expired and same-day (0DTE) contracts: BSM IV at ~0 time
+                # to expiry is degenerate and distorts term-structure metrics.
                 continue
             try:
                 calls, puts = self._provider.get_option_chain(symbol, expiry)
