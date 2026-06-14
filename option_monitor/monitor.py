@@ -28,6 +28,7 @@ the date the snapshot was actually taken).
 import logging
 from datetime import date, datetime, timedelta
 from typing import Union
+from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -35,6 +36,50 @@ import pandas as pd
 from datafeed.yahoo_finance import YahooFinanceProvider
 
 logger = logging.getLogger(__name__)
+
+NY_TZ = ZoneInfo("America/New_York")
+
+# A US equity session's daily bar is final shortly after the 4pm ET close;
+# small buffer for late prints / Yahoo propagation.
+SESSION_CLOSE_ET = (16, 5)  # (hour, minute)
+
+
+def last_completed_session(
+    provider: YahooFinanceProvider | None = None,
+    now: datetime | None = None,
+    reference_symbol: str = "SPY",
+) -> date:
+    """Date of the most recent *completed* US equity session.
+
+    Uses the reference symbol's daily bars (so weekends and exchange
+    holidays are handled by the exchange calendar itself) and drops the
+    last bar when it belongs to a session still in progress:
+
+    - run during market hours → yesterday's (or Friday's) session
+    - run after ~4:05pm ET    → today's session
+    - run on weekend/holiday  → last trading day
+    """
+    provider = provider or YahooFinanceProvider()
+    now = now.astimezone(NY_TZ) if now else datetime.now(NY_TZ)
+
+    hist = provider.get_history(reference_symbol, period="1mo", interval="1d")
+    bar_dates = [pd.Timestamp(ts).date() for ts in hist.index]
+    last_bar = bar_dates[-1]
+
+    close_cutoff = now.replace(
+        hour=SESSION_CLOSE_ET[0], minute=SESSION_CLOSE_ET[1],
+        second=0, microsecond=0,
+    )
+    if last_bar == now.date() and now < close_cutoff:
+        # Today's bar is still building — the completed session is the
+        # previous bar.
+        if len(bar_dates) < 2:
+            raise ValueError(
+                f"Not enough daily bars for {reference_symbol} to determine "
+                "the last completed session."
+            )
+        return bar_dates[-2]
+    return last_bar
 
 
 def _parse_date(d: Union[date, str, None]) -> date:
@@ -77,23 +122,8 @@ DEFAULT_UNIVERSE: list[str] = ETF_UNIVERSE + EQUITY_UNIVERSE
 
 # ── Bucket definitions ────────────────────────────────────────────────────────
 
-# (lower_inclusive, upper_exclusive, label)  — None upper means open-ended
-DTE_BUCKETS: list[tuple] = [
-    (0,  30,  "0-30d"),
-    (31, 60,  "31-60d"),
-    (61, 90,  "61-90d"),
-    (91, None, ">90d"),
-]
-
-# Moneyness = strike / spot; labels describe strike level relative to spot
-# (lower_inclusive, upper_exclusive, label)
-MONEYNESS_BUCKETS: list[tuple] = [
-    (0.0,  0.85, "deep_below"),  # > 15 % below spot
-    (0.85, 0.97, "below"),       # 3–15 % below spot
-    (0.97, 1.03, "near_atm"),    # within 3 % of spot
-    (1.03, 1.15, "above"),       # 3–15 % above spot
-    (1.15, None, "deep_above"),  # > 15 % above spot
-]
+# Bucket boundaries live in ``_dte_bucket`` and ``_moneyness_bucket`` — see
+# those methods for the exact (inclusive) cut-offs.
 
 SKEW_WIDTH: float = 0.05   # 5 % OTM on each side for skew
 HV_WINDOWS: list[int] = [5, 20, 60]
@@ -103,6 +133,16 @@ HV_WINDOWS: list[int] = [5, 20, 60]
 # are dropped from the chain.
 IV_MIN: float = 0.01   # 1 %
 IV_MAX: float = 3.00   # 300 %
+
+# Outside market hours Yahoo sometimes wipes real IVs and serves a synthetic
+# default surface: almost every contract gets a power-of-two value (1/2, 1/4,
+# …, 1/1024, each + Yahoo's 1e-5 epsilon) — e.g. a chain whose "ATM IV" comes
+# out near 2%.  Real IVs essentially never sit exactly on 2^-k.  When more
+# than IV_JUNK_SHARE of a chain's IVs match the pattern, the IV field is
+# declared unreliable and masked to missing.
+_IV_POW2_GRID = np.array([2.0 ** -k for k in range(1, 11)])
+IV_JUNK_TOL: float = 2e-5   # |iv - 1e-5 - 2^-k| tolerance
+IV_JUNK_SHARE: float = 0.5
 
 # Positioning metrics (max pain / walls) are per-expiry concepts; mixing
 # LEAPS OI with weeklies dilutes the levels.  Restrict to near-term chain.
@@ -188,9 +228,12 @@ class OptionMonitor:
                 spot, spot_row = self._spot_snapshot(symbol, vdate)
                 spot_rows.append(spot_row)
 
-                chain, chain_last_trade = self._build_chain(symbol, spot, vdate)
+                chain, chain_last_trade, iv_reliable = self._build_chain(
+                    symbol, spot, vdate
+                )
                 quality_rows.append(self._quality_row(
-                    symbol, vdate, spot_row, chain, chain_last_trade
+                    symbol, vdate, spot_row, chain, chain_last_trade,
+                    iv_reliable,
                 ))
                 if chain.empty:
                     logger.warning("%s: empty option chain — skipped", symbol)
@@ -260,7 +303,8 @@ class OptionMonitor:
         if price_is_stale:
             logger.warning(
                 "%s: last price bar is %s but valuation date is %s — market "
-                "not open yet? spot/volume metrics reflect the prior session",
+                "closed (pre-open, weekend or holiday)? spot/volume metrics "
+                "reflect the prior session",
                 symbol, price_date.isoformat(), valuation_date.isoformat(),
             )
 
@@ -284,12 +328,15 @@ class OptionMonitor:
 
     def _build_chain(
         self, symbol: str, spot: float, valuation_date: date
-    ) -> tuple[pd.DataFrame, date | None]:
+    ) -> tuple[pd.DataFrame, date | None, bool]:
         """Build the filtered chain.
 
-        Returns ``(chain, last_trade_date)`` where ``last_trade_date`` is the
-        most recent option trade timestamp seen across the raw chain — used
-        to flag stale (pre-open / holiday) snapshots.
+        Returns ``(chain, last_trade_date, iv_reliable)``:
+        ``last_trade_date`` is the most recent option trade timestamp seen
+        across the raw chain (used to flag stale pre-open / holiday
+        snapshots); ``iv_reliable`` is ``False`` when Yahoo served
+        grid-quantized placeholder IVs — all IVs are then masked to missing
+        and every IV-based metric comes out empty.
         """
         expirations = self._provider.get_option_expirations(symbol)
         frames = []
@@ -316,7 +363,7 @@ class OptionMonitor:
                 frames.append(df)
 
         if not frames:
-            return pd.DataFrame(), None
+            return pd.DataFrame(), None, True
 
         chain = pd.concat(frames, ignore_index=True)
 
@@ -330,22 +377,45 @@ class OptionMonitor:
                 if last_trade_date < valuation_date:
                     logger.warning(
                         "%s: option chain is stale — last option trade %s vs "
-                        "valuation date %s (market not open yet?)",
+                        "valuation date %s (market closed: pre-open, weekend "
+                        "or holiday?)",
                         symbol, last_trade_date.isoformat(),
                         valuation_date.isoformat(),
                     )
 
         chain = chain[[c for c in _CHAIN_COLS if c in chain.columns]]
 
-        # Quality filters:
-        #   - IV must be within sane bounds (Yahoo uses ~1e-5 as a "missing"
-        #     placeholder; stale deep-OTM quotes can show absurd IV)
-        #   - contract must show signs of life: a live bid or traded volume
-        chain = chain[
-            chain["impliedVolatility"].notna()
-            & (chain["impliedVolatility"] >= IV_MIN)
-            & (chain["impliedVolatility"] <= IV_MAX)
-        ]
+        # IV reliability: when most IVs sit exactly on the power-of-two grid
+        # (2^-k + 1e-5) Yahoo is serving its synthetic default surface, not
+        # market data (typical outside market hours).  Mask ALL IVs to
+        # missing — a junk surface must never feed the term structure / skew
+        # / sentiment.  OI & volume metrics survive.
+        iv_reliable = True
+        iv = pd.to_numeric(chain["impliedVolatility"], errors="coerce")
+        notna = iv.dropna()
+        if len(notna):
+            dist = np.abs(
+                notna.to_numpy()[:, None] - 1e-5 - _IV_POW2_GRID[None, :]
+            ).min(axis=1)
+            junk_share = float((dist < IV_JUNK_TOL).mean())
+            if junk_share > IV_JUNK_SHARE:
+                iv_reliable = False
+                logger.warning(
+                    "%s: %.0f%% of option IVs are power-of-two placeholders — "
+                    "Yahoo is serving a synthetic IV surface (market closed?). "
+                    "All IV-based metrics for this symbol are reported as "
+                    "missing.",
+                    symbol, junk_share * 100,
+                )
+                iv[:] = np.nan
+
+        # Per-contract IV sanity — mask to missing, don't drop the contract
+        # (Yahoo uses ~1e-5 as a "missing" placeholder; stale deep-OTM quotes
+        # can show absurd IV).  OI / volume of that contract remain valid.
+        iv[(iv < IV_MIN) | (iv > IV_MAX)] = np.nan
+        chain["impliedVolatility"] = iv
+
+        # Liveness: contract must show a live bid or traded volume.
         if "bid" in chain.columns:
             alive = chain["bid"].fillna(0) > 0
             if "volume" in chain.columns:
@@ -353,9 +423,10 @@ class OptionMonitor:
             chain = chain[alive]
         chain = chain[chain["openInterest"].notna()]
 
+        chain = chain.copy()
         chain["dte_bucket"] = chain["dte"].apply(self._dte_bucket)
         chain["moneyness_bucket"] = chain["moneyness"].apply(self._moneyness_bucket)
-        return chain.reset_index(drop=True), last_trade_date
+        return chain.reset_index(drop=True), last_trade_date, iv_reliable
 
     # ── Data quality ──────────────────────────────────────────────────────────
 
@@ -366,6 +437,7 @@ class OptionMonitor:
         spot_row: dict,
         chain: pd.DataFrame,
         chain_last_trade: date | None,
+        iv_reliable: bool,
     ) -> dict:
         """Per-symbol freshness/completeness flags (no values are imputed)."""
         volume_reported = bool(
@@ -387,6 +459,7 @@ class OptionMonitor:
             "chain_is_stale": chain_is_stale,
             "n_contracts": int(len(chain)),
             "volume_reported": volume_reported,
+            "iv_reliable": iv_reliable,
         }
 
     # ── IV term structure ─────────────────────────────────────────────────────
@@ -668,6 +741,7 @@ class OptionMonitor:
         ``target`` lies outside the listed strike range the nearest endpoint
         is used.  Duplicate strikes are averaged first.
         """
+        df = df.dropna(subset=["impliedVolatility"])
         if df.empty:
             return None
         by_strike = df.groupby("strike")["impliedVolatility"].mean().sort_index()
@@ -695,6 +769,7 @@ class OptionMonitor:
 
     @staticmethod
     def _dte_bucket(dte: int) -> str:
+        """DTE bucket; boundaries inclusive: ≤30, 31–60, 61–90, >90."""
         if dte <= 30:
             return "0-30d"
         elif dte <= 60:
@@ -705,6 +780,11 @@ class OptionMonitor:
 
     @staticmethod
     def _moneyness_bucket(moneyness: float) -> str:
+        """Strike/spot bucket.
+
+        Boundaries: < 0.85 deep_below; [0.85, 0.97) below; [0.97, 1.03]
+        near_atm; (1.03, 1.15] above; > 1.15 deep_above.
+        """
         if moneyness < 0.85:
             return "deep_below"
         elif moneyness < 0.97:

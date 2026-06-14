@@ -2,21 +2,31 @@
 
 Reads CSV snapshots written by ``option_monitor/run.py`` from
 ``output/option_monitor/<date>/`` (legacy flat CSVs in the folder root are
-also picked up) and renders three views:
+also picked up) and renders four views:
 
-  Market Overview – per-symbol sentiment / vol / flow summary for one day
+  Live            – real-time prices (websocket stream or 1-minute polling)
+  Market Overview – per-symbol sentiment / vol / flow summary for one session
   Symbol Detail   – term structure, skew, put/call flow and key levels
   Trends          – metric history across snapshots (needs >= 2 run dates)
 
+Every view is labelled with the vintage of its data: 🔴 LIVE quotes carry
+their timestamp; EOD panels state which completed session they describe.
+
 Run:
     uv run streamlit run option_monitor/dashboard.py
+
+Optional, for lowest-latency live quotes, run the streamer alongside:
+    uv run python -m option_monitor.stream
 
 See option_monitor/README.md for the full documentation.
 """
 
 from __future__ import annotations
 
+import json
 import re
+import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +34,14 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from option_monitor.realtime import (
+    STREAM_FILE,
+    RealtimeQuoteService,
+    read_stream_quotes,
+)
 
 BASE_DIR = Path(__file__).parent.parent / "output" / "option_monitor"
 TABLES = [
@@ -39,6 +57,32 @@ st.set_page_config(page_title="Option Market Monitor", layout="wide")
 
 
 # ── Data loading ──────────────────────────────────────────────────────────────
+
+def load_meta(folder: Path) -> dict:
+    """Read the snapshot's meta.json; {} for older snapshots."""
+    p = Path(folder) / "meta.json"
+    if p.exists():
+        try:
+            return json.loads(p.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {}
+
+
+@st.cache_data(ttl=60, show_spinner="Fetching live quotes…")
+def poll_live_quotes(symbols: tuple[str, ...]) -> pd.DataFrame:
+    """Polling fallback (cached 60 s so reruns don't hammer Yahoo)."""
+    return RealtimeQuoteService().fetch(list(symbols))
+
+
+def get_live_quotes(symbols: list[str]) -> pd.DataFrame:
+    """Websocket stream file when fresh, else batched 1-minute polling."""
+    stream_path = Path(__file__).parent.parent / STREAM_FILE
+    df = read_stream_quotes(stream_path, symbols)
+    if not df.empty and bool(df["is_live"].any()):
+        return df
+    return poll_live_quotes(tuple(symbols))
+
 
 def discover_snapshots() -> dict[str, Path]:
     """Map snapshot date -> folder. Includes legacy flat CSVs in the root."""
@@ -148,11 +192,22 @@ if not snapshots:
 dates = sorted(snapshots.keys(), reverse=True)
 with st.sidebar:
     st.title("Option Market Monitor")
-    sel_date = st.selectbox("Snapshot date", dates, index=0)
+    sel_date = st.selectbox("EOD session", dates, index=0)
     snap = load_snapshot(str(snapshots[sel_date]))
+    meta = load_meta(snapshots[sel_date])
     overview = build_overview(snap)
     all_symbols = sorted(overview["symbol"].unique()) if not overview.empty else []
     st.caption(f"{len(all_symbols)} symbols · {len(dates)} snapshot(s) on disk")
+    if meta:
+        st.caption(
+            f"📁 EOD snapshot for session **{meta.get('session_date', sel_date)}**, "
+            f"captured {meta.get('run_at_et', '?')}"
+        )
+        if meta.get("chain_captured_live_during_newer_session"):
+            st.caption(
+                "⚠️ option chain was captured live during a newer session — "
+                "IV/flow are fresher than the EOD prices"
+            )
     st.markdown(
         "**How to read the scores**\n\n"
         "- **Sentiment**: options-flow composite vs. the rest of the universe; "
@@ -170,12 +225,25 @@ if not dq.empty:
     stale_price = dq[dq["price_is_stale"] == True]["symbol"].tolist()  # noqa: E712
     stale_chain = dq[dq["chain_is_stale"] == True]["symbol"].tolist()  # noqa: E712
     no_volume = dq[dq["volume_reported"] == False]["symbol"].tolist()  # noqa: E712
+    junk_iv = (
+        dq[dq["iv_reliable"] == False]["symbol"].tolist()  # noqa: E712
+        if "iv_reliable" in dq.columns else []
+    )
     msgs = []
+    if junk_iv:
+        msgs.append(
+            f"**Unreliable implied vols** ({len(junk_iv)} symbols): Yahoo served "
+            f"placeholder IVs instead of market data (chain captured while the "
+            f"market was closed). All IV-based metrics (ATM IV, skew, IV−RV, "
+            f"term slope) are shown as missing — re-run the snapshot during or "
+            f"just after market hours."
+        )
     if stale_price:
         msgs.append(
             f"**Stale prices** ({len(stale_price)} symbols): last price bar predates "
-            f"the snapshot date — the market had not opened yet. Spot, change % and "
-            f"relative volume reflect the *prior* session."
+            f"the snapshot date — the market was closed (pre-open, weekend or "
+            f"holiday). Spot, change % and relative volume reflect the *prior* "
+            f"session."
         )
     if stale_chain:
         msgs.append(
@@ -202,13 +270,89 @@ elif not overview.empty:
         "data cannot be verified."
     )
 
-tab_overview, tab_detail, tab_trends = st.tabs(
-    ["📊 Market Overview", "🔍 Symbol Detail", "📈 Trends"]
+tab_live, tab_overview, tab_detail, tab_trends = st.tabs(
+    ["🔴 Live", "📊 Market Overview (EOD)", "🔍 Symbol Detail (EOD)", "📈 Trends (EOD)"]
 )
+
+
+def _eod_caption() -> str:
+    cap = f"📁 **END-OF-DAY** — completed session **{sel_date}**"
+    if meta.get("run_at_et"):
+        cap += f", captured {meta['run_at_et']}"
+    if meta.get("chain_captured_live_during_newer_session"):
+        cap += (" · ⚠️ option chain captured live during a newer session "
+                "(IV/flow fresher than the EOD prices)")
+    return cap
+
+
+# ── Live ─────────────────────────────────────────────────────────────────────────
+
+with tab_live:
+    st.caption(
+        "🔴 **REAL-TIME** — price ticks via Yahoo websocket stream when "
+        "`python -m option_monitor.stream` is running, otherwise 1-minute "
+        "polling (~1 min delay, cached 60 s). Quotes older than 3 minutes "
+        "are marked *not live* (last print of a closed session). "
+        "Options data is **not** available in real time — see the EOD tabs."
+    )
+    if st.button("↻ Refresh quotes"):
+        poll_live_quotes.clear()
+        st.rerun()
+
+    live_symbols = all_symbols or ["SPY", "QQQ", "IWM", "DIA"]
+    try:
+        live = get_live_quotes(live_symbols)
+    except Exception as exc:  # network failure must not kill the app
+        live = pd.DataFrame()
+        st.error(f"Live quotes unavailable: {exc}")
+
+    if live.empty:
+        st.warning("No live quotes returned — missing, not faked.")
+    else:
+        n_live = int(live["is_live"].sum())
+        src = live["source"].iloc[0]
+        asof = max(live["quote_time"])
+        st.markdown(
+            f"**{n_live}/{len(live)} symbols live** · source: `{src}` · "
+            f"latest tick: {asof:%Y-%m-%d %H:%M:%S %Z}"
+        )
+        if n_live == 0:
+            st.info(
+                "Market appears closed — these are the last prints of the "
+                "previous session, not live prices."
+            )
+
+        disp = live.copy()
+        disp["quote_time"] = pd.to_datetime(disp["quote_time"], utc=True) \
+            .dt.tz_convert("America/New_York").dt.strftime("%H:%M:%S ET")
+        disp["status"] = np.where(disp["is_live"], "🔴 live", "⚪ stale")
+        show = disp[["symbol", "price", "change_pct", "prev_close",
+                     "quote_time", "age_sec", "status"]]
+        styled = (
+            show.sort_values("change_pct", ascending=False, na_position="last")
+            .style.format({"price": "{:,.2f}", "prev_close": "{:,.2f}",
+                           "change_pct": "{:+.2f}%"}, na_rep="–")
+            .background_gradient(subset=["change_pct"], cmap="RdYlGn",
+                                 vmin=-3, vmax=3)
+        )
+        st.dataframe(styled, width="stretch", height=600, hide_index=True)
+
+        chg = live.dropna(subset=["change_pct"]).sort_values("change_pct")
+        if len(chg):
+            fig = px.bar(
+                chg, x="change_pct", y="symbol", orientation="h",
+                color="change_pct", color_continuous_scale=[RED, "#cccccc", GREEN],
+                color_continuous_midpoint=0, height=max(420, 22 * len(chg)),
+                title="Change vs previous session close (%)",
+            )
+            fig.update_layout(coloraxis_showscale=False, yaxis_title="",
+                              xaxis_title="% change")
+            st.plotly_chart(fig, width="stretch")
 
 # ── Market Overview ───────────────────────────────────────────────────────────
 
 with tab_overview:
+    st.caption(_eod_caption())
     if overview.empty:
         st.warning("Snapshot has no data.")
     else:
@@ -270,6 +414,7 @@ with tab_overview:
 # ── Symbol Detail ─────────────────────────────────────────────────────────────
 
 with tab_detail:
+    st.caption(_eod_caption())
     if not all_symbols:
         st.warning("Snapshot has no data.")
     else:
@@ -402,6 +547,7 @@ with tab_detail:
 # ── Trends ────────────────────────────────────────────────────────────────────
 
 with tab_trends:
+    st.caption("📁 **END-OF-DAY** — one point per completed session.")
     history = load_history({d: str(p) for d, p in snapshots.items()})
     n_dates = history["date"].nunique() if not history.empty else 0
     if n_dates < 2:
