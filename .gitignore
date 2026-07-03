@@ -35,3 +35,6 @@ pdf_parser/pdf_files/
 rag_output/
 
 output/
+
+my_playground/data
+**.pth
