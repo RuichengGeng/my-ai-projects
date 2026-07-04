@@ -45,6 +45,7 @@ dependencies = [
     "plotly>=5.24.0",
     "torchvision==0.27.0",
     "modal>=1.5.1",
+    "transformers>=4.53.3",
 ]
 
 [tool.setuptools.packages.find]
