@@ -1,6 +1,0 @@
-[submodule "kronos"]
-	path = kronos
-	url = https://github.com/shiyu-coder/Kronos.git
-[submodule "ta-agents"]
-	path = ta-agents
-	url = https://github.com/tauricresearch/tradingagents.git
