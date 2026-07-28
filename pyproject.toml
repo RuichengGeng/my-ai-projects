@@ -50,8 +50,8 @@ dependencies = [
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["finance_ai*", "my_playground*", "rag*", "pdf_parser*", "utils*", "option_monitor*", "datafeed*"]
-exclude = ["kronos*", "tradingagents*"]
+include = ["my_playground*", "rag*", "pdf_parser*", "utils*", "option_monitor*", "datafeed*", "strategies*"]
+exclude = []
 
 [build-system]
 requires = ["setuptools>=61.0"]
